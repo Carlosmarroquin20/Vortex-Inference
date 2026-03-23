@@ -1,0 +1,88 @@
+# =============================================================================
+# Environment & Secrets
+# The .env file may contain local paths or tokens — never committed.
+# .env.example is the only environment file that belongs in version control.
+# =============================================================================
+.env
+.env.local
+.env.*.local
+.env.example
+
+# =============================================================================
+# Model Files
+# GGUF/GGML weights are binary blobs ranging from 2GB to 70GB+.
+# They have no place in git history — use a model registry (HF Hub, S3, GCS)
+# or the provided download script for reproducible model provisioning.
+# =============================================================================
+models/
+*.gguf
+*.ggml
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+wheels/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# =============================================================================
+# Docker
+# =============================================================================
+# Local image tarballs exported for airgap transfer
+*.tar
+*.tar.gz
+
+# =============================================================================
+# Kubernetes / Helm
+# =============================================================================
+# Local overrides with sensitive values (registry credentials, tokens)
+k8s/secrets*.yaml
+k8s/*-secret.yaml
+helm/*/charts/
+helm/*/Chart.lock
+
+# =============================================================================
+# IDE & OS
+# =============================================================================
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Logs & Profiling
+# =============================================================================
+*.log
+logs/
+*.prof

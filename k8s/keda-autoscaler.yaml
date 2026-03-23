@@ -1,0 +1,118 @@
+---
+# KEDA ScaledObject — event-driven horizontal autoscaler for the inference Deployment.
+#
+# Why KEDA over native HPA:
+#   The native Kubernetes HPA can scale on CPU and memory, but CPU utilization
+#   is a poor signal for LLM inference workloads. A pod can be idle at 5% CPU
+#   while holding 10 requests in its semaphore queue (all waiting for the active
+#   inference to complete). KEDA's Prometheus trigger scales on
+#   vortex_inference_active_requests — the metric that actually reflects
+#   demand on the inference engine, not incidental CPU activity.
+#
+# Scaling formula:
+#   desiredReplicas = ceil( sum(vortex_inference_active_requests) / threshold )
+#   Example: 7 active requests, threshold=3 → ceil(7/3) = 3 replicas
+#
+# The ScaledObject controller patches the Deployment's spec.replicas field
+# directly. The value set in deployment.yaml (replicas: 1) acts as the
+# initial state and is overridden at runtime by KEDA.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vortex-inference-scaler
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: autoscaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vortex-inference
+
+  # minReplicaCount=1 prevents scale-to-zero. Scale-to-zero is unsuitable for
+  # this workload because model loading takes 60–90s — unacceptable cold-start
+  # latency for an interactive API. Maintaining one warm pod at all times is
+  # the correct trade-off between resource efficiency and availability.
+  minReplicaCount: 1
+
+  # maxReplicaCount=3 is constrained by node memory:
+  #   3 pods × 4Gi limit = 12Gi, matching available Minikube node RAM.
+  # In a production cluster with GPU nodes, this value would be driven by
+  # cost/latency SLOs, not hardware limits.
+  maxReplicaCount: 3
+
+  # pollingInterval: how frequently KEDA queries the Prometheus metric (seconds).
+  # 15s provides fast reaction to demand spikes without overwhelming Prometheus
+  # with high-frequency queries. For tighter SLOs, reduce to 10s.
+  pollingInterval: 15
+
+  # cooldownPeriod: seconds KEDA waits before scaling IN (reducing replicas)
+  # after the metric drops below threshold.
+  #
+  # 300s (5 minutes) is intentionally aggressive for LLM workloads because:
+  #   1. Model loading has a 60–90s startup cost — rapid scale-in/out cycles
+  #      ("flapping") waste resources and degrade availability.
+  #   2. Inference traffic is often bursty with short lulls between bursts.
+  #      A short cooldown would scale in during the lull and then immediately
+  #      scale out for the next burst, creating a sawtooth pattern.
+  #   3. Scale-out is gated by the startup probe (up to 300s) — asymmetric
+  #      timing means scale-out is slow; we compensate by making scale-in slow too.
+  cooldownPeriod: 300
+
+  # advanced.restoreToOriginalReplicaCount: false keeps replicas at the KEDA-
+  # managed minimum when the ScaledObject is deleted, rather than reverting to
+  # the Deployment's spec.replicas value. Prevents accidental traffic disruption
+  # if the ScaledObject is removed during a rollback scenario.
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          # scaleUp.stabilizationWindowSeconds=0: react to increased demand immediately.
+          # There is no benefit to waiting when the workload is latency-sensitive
+          # and scale-out is already gated by the model loading startup probe.
+          stabilizationWindowSeconds: 0
+          policies:
+          - type: Pods
+            value: 1      # Add at most 1 pod per scaling event
+            periodSeconds: 30
+        scaleDown:
+          # scaleDown.stabilizationWindowSeconds=300: use the maximum metric value
+          # over the past 5 minutes before deciding to scale in. This window must
+          # equal cooldownPeriod to produce consistent behavior.
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1      # Remove at most 1 pod per scaling event
+            periodSeconds: 60
+
+  triggers:
+  - type: prometheus
+    metadata:
+      # serverAddress must point to the Prometheus service inside the cluster.
+      # kube-prometheus-stack exposes Prometheus on port 9090 in the monitoring namespace.
+      # Verify with: kubectl get svc -n monitoring | grep prometheus
+      serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+
+      # metricName is used as the HPA metric name — must be unique across all
+      # ScaledObjects querying the same Prometheus instance to avoid HPA conflicts.
+      metricName: vortex_inference_active_requests_total
+
+      # query returns the total active requests across all pods in the namespace.
+      # Aggregating with sum() ensures KEDA accounts for the collective load
+      # rather than scaling based on a single pod's metric (which would be
+      # misleading after the first scale-out event adds more replicas).
+      query: sum(vortex_inference_active_requests{namespace="vortex-inference"})
+
+      # threshold: target active requests per replica.
+      # With threshold=3 and max_concurrent_requests=1 per pod, a value of 3
+      # means KEDA tolerates a queue depth of ~2 waiting requests before scaling.
+      # Tuning: lower threshold → faster scale-out (better latency, higher cost)
+      #         higher threshold → slower scale-out (higher latency, lower cost)
+      threshold: "3"
+
+      # Ignore missing metric (e.g., when all pods are idle and Prometheus has
+      # no recent samples). Without this, KEDA would error and potentially
+      # scale to 0 or max replicas depending on error handling mode.
+      ignoreNullValues: "true"

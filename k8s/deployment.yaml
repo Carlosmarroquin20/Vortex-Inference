@@ -1,0 +1,220 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vortex-inference
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: inference-server
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  # replicas is intentionally set to 1 here. KEDA's ScaledObject will override
+  # this field at runtime. Setting it to 1 (not 0) ensures there is always a
+  # warm pod available — a "cold start" of 60–90s for model loading is
+  # unacceptable latency for the first request after a scale-from-zero event.
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-inference
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxSurge=1 allows one additional pod during rollout, briefly doubling
+      # memory usage on the node. On a 12GB node with 4Gi per pod, two pods
+      # simultaneously = 8Gi, staying within the ResourceQuota.
+      maxSurge: 1
+      # maxUnavailable=0 enforces zero-downtime deployments. The new pod must
+      # pass its readiness probe before the old pod is terminated.
+      maxUnavailable: 0
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vortex-inference
+        app.kubernetes.io/component: inference-server
+      annotations:
+        # Prometheus scrape annotations for environments without a ServiceMonitor CRD
+        # (i.e., without prometheus-operator). Both methods are supported simultaneously.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      # terminationGracePeriodSeconds must exceed the worst-case inference duration.
+      # On SIGTERM, the pod stops accepting new connections but must finish serving
+      # in-flight requests. 120s covers Phi-3-mini at max_tokens=2048 on 2 CPU threads.
+      # Setting this too low causes mid-inference kills that produce 500s at the client.
+      terminationGracePeriodSeconds: 130
+
+      # ServiceAccount with minimal RBAC — the inference pod has no reason to
+      # call the Kubernetes API. automountServiceAccountToken=false eliminates
+      # the default token mount, reducing the blast radius of a container escape.
+      automountServiceAccountToken: false
+
+      # Pod-level security context enforces the namespace's restricted PSS policy.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # ---------------------------------------------------------------------------
+      # Pod Anti-Affinity
+      # ---------------------------------------------------------------------------
+      # preferredDuringScheduling (soft) rather than required (hard) is intentional
+      # for a single-node Minikube environment. In a multi-node production cluster,
+      # this preference would spread replicas across failure domains (nodes/AZs).
+      # Using "preferred" ensures KEDA can still scale beyond the number of nodes
+      # without blocking pod scheduling — a trade-off between availability and
+      # strict placement guarantees.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100  # Maximum preference weight — scheduler strongly avoids co-location
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: vortex-inference
+              topologyKey: kubernetes.io/hostname
+
+      # ---------------------------------------------------------------------------
+      # Topology Spread Constraints
+      # ---------------------------------------------------------------------------
+      # Complements anti-affinity with explicit spreading semantics.
+      # whenUnsatisfiable=ScheduleAnyway allows the scheduler to proceed when the
+      # constraint cannot be satisfied (e.g., single-node Minikube), preventing
+      # scale-out events from stalling indefinitely in Pending state.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: vortex-inference
+
+      containers:
+      - name: inference-server
+        image: vortex-inference:1.0.0
+        # imagePullPolicy=Never is required for Minikube when the image is built
+        # locally with: eval $(minikube docker-env) && docker build ...
+        # In production, change to IfNotPresent and push to a registry.
+        imagePullPolicy: Never
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+
+        # ---------------------------------------------------------------------------
+        # Environment — injected from ConfigMap
+        # ---------------------------------------------------------------------------
+        envFrom:
+        - configMapRef:
+            name: vortex-inference-config
+
+        # ---------------------------------------------------------------------------
+        # Resource Management
+        # ---------------------------------------------------------------------------
+        # Requests define the guaranteed allocation used for bin-packing decisions.
+        # Limits define the hard ceiling enforced by the cgroup.
+        #
+        # Memory request (2Gi) < limit (4Gi) to allow bursting during model loading,
+        # which has a higher peak allocation than steady-state inference.
+        # A request == limit (Guaranteed QoS) would prevent this burst and increase
+        # the risk of OOM during pod startup in memory-constrained environments.
+        #
+        # CPU request (2000m) aligns with VORTEX_N_THREADS=2 in the ConfigMap.
+        # CPU limit (3500m) provides burst headroom for tokenizer preprocessing
+        # and HTTP handler overhead without allowing monopolization of the node.
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "2000m"
+          limits:
+            memory: "4Gi"  # Hard ceiling — kubelet OOM-kills this pod at 4GiB
+            cpu: "3500m"
+
+        # ---------------------------------------------------------------------------
+        # Container Security Context
+        # ---------------------------------------------------------------------------
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop: ["ALL"]
+
+        # ---------------------------------------------------------------------------
+        # Probes
+        # ---------------------------------------------------------------------------
+        # startupProbe: disables liveness checks during the slow model-loading phase.
+        # Without this, liveness would kill the pod during its ~60–90s initialization
+        # window, causing an infinite restart loop (CrashLoopBackOff).
+        # failureThreshold * periodSeconds = 30 * 10 = 300s maximum startup budget.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 30  # 300s total startup budget
+          successThreshold: 1
+          timeoutSeconds: 5
+
+        # readinessProbe: gates traffic routing. A failing readiness probe removes
+        # the pod from the Service's Endpoints slice — the correct behavior during
+        # model reloads or temporary resource exhaustion.
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 3   # 30s of failures before pod is marked NotReady
+          successThreshold: 1
+          timeoutSeconds: 5
+
+        # livenessProbe: triggers pod restart on deadlocks or zombie states.
+        # The period is intentionally longer than readiness — a temporarily
+        # slow pod should be taken out of rotation (readiness) before it is
+        # killed and restarted (liveness), minimizing disruption.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 30
+          failureThreshold: 3   # 90s of consecutive failures triggers restart
+          successThreshold: 1
+          timeoutSeconds: 10
+
+        # lifecycle.preStop ensures in-flight requests complete before the pod
+        # receives SIGTERM. The sleep duration must be long enough to drain
+        # the load balancer's connection table — typically 5–15s for kube-proxy.
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 10"]
+
+        # ---------------------------------------------------------------------------
+        # Volume Mounts
+        # ---------------------------------------------------------------------------
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        # tmp volume for the read-only root filesystem
+        - name: tmp
+          mountPath: /tmp
+
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: vortex-model-pvc
+          readOnly: true
+      - name: tmp
+        emptyDir:
+          medium: ""
+          sizeLimit: "100Mi"

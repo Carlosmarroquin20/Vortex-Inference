@@ -1,0 +1,49 @@
+---
+# ConfigMap stores non-sensitive runtime configuration injected as environment
+# variables into the inference pods. This decouples the configuration lifecycle
+# from the container image lifecycle — a model tuning change (e.g., adjusting
+# n_ctx) requires only a ConfigMap update and a rolling restart, not a new build.
+#
+# Sensitive values (API keys, registry credentials) must NOT be stored here.
+# Use Kubernetes Secrets with external-secrets-operator or Vault agent injection
+# in environments requiring secrets management compliance.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vortex-inference-config
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: config
+data:
+  # Path inside the container where the PVC is mounted.
+  # Changing this value requires a matching update to the volumeMounts
+  # section in deployment.yaml — they are intentionally not coupled
+  # to avoid silent misconfiguration.
+  VORTEX_MODEL_PATH: "/models/phi-3-mini-4k-instruct-q4_k_m.gguf"
+  VORTEX_MODEL_NAME: "phi-3-mini-4k-instruct"
+
+  # n_ctx=4096 matches Phi-3-mini's training context window.
+  # Increasing this beyond the model's native context does not improve
+  # output quality and increases KV-cache memory allocation proportionally.
+  VORTEX_N_CTX: "4096"
+
+  # n_threads=2 matches the pod's CPU request (2000m = 2 vCPU).
+  # Aligning thread count to CPU requests rather than limits prevents
+  # throttling-induced latency spikes under CFS scheduling pressure.
+  VORTEX_N_THREADS: "2"
+
+  # Full CPU inference. Set to "-1" to offload all layers to GPU when
+  # running on a node with NVIDIA device plugin enabled.
+  VORTEX_N_GPU_LAYERS: "0"
+
+  # Serialized inference enforced at application layer.
+  # See app/main.py for the rationale behind max_concurrent_requests=1.
+  VORTEX_MAX_CONCURRENT_REQUESTS: "1"
+
+  VORTEX_PORT: "8080"
+
+  # Timeout must be less than the Kubernetes Service sessionAffinity
+  # clientIP.timeoutSeconds (default 10800s) and the upstream client's
+  # read timeout. 120s covers Phi-3-mini at 2048 max_tokens on 2 CPU threads.
+  VORTEX_INFERENCE_TIMEOUT_SECONDS: "120.0"

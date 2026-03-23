@@ -1,0 +1,58 @@
+---
+# ClusterIP service for internal cluster communication.
+# Used by KEDA's Prometheus trigger to reach the Prometheus server, and
+# by internal clients (e.g., a gateway or test pod) without external exposure.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vortex-inference
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: inference-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vortex-inference
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+
+---
+# LoadBalancer service for external access in Minikube via `minikube tunnel`.
+# In production on AWS/GCP/Azure, this type provisions a cloud load balancer
+# automatically. The annotation pattern here mirrors what would be used for
+# AWS NLB or GCP Network LB — replacing it demonstrates familiarity with
+# cloud-specific provisioning without coupling the spec to a single provider.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vortex-inference-lb
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: inference-server
+  annotations:
+    # AWS NLB annotation (commented out — shown to demonstrate production pattern):
+    # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    # service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    #
+    # For Minikube: run `minikube tunnel` in a separate terminal to provision
+    # a reachable EXTERNAL-IP on 127.0.0.1.
+    minikube.k8s.io/tunnel: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: vortex-inference
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  # sessionAffinity: None — LLM inference is stateless per request.
+  # Each request carries the full prompt context, so there is no benefit
+  # to routing a client to the same pod repeatedly. Round-robin distribution
+  # is preferable for load balancing across KEDA-scaled replicas.
+  sessionAffinity: None

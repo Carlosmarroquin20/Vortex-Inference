@@ -1,0 +1,54 @@
+---
+# ServiceMonitor CRD — instructs the Prometheus Operator to scrape the
+# vortex-inference pods. This is the declarative alternative to static
+# scrape configs in prometheus.yml. The Operator translates this resource
+# into a Prometheus target configuration without requiring a Prometheus restart.
+#
+# Prerequisite: kube-prometheus-stack must be installed with:
+#   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+# This allows Prometheus to discover ServiceMonitors in all namespaces,
+# not just the monitoring namespace where the Helm chart is installed.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vortex-inference
+  # The ServiceMonitor must be in the SAME namespace as the Prometheus resource
+  # (typically "monitoring") when using cross-namespace discovery, OR in the
+  # application namespace if Prometheus is configured to watch all namespaces.
+  # We place it in the application namespace to keep monitoring config co-located
+  # with the application manifests — consistent with the GitOps "app-of-apps" pattern.
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: monitoring
+    # This label must match the Prometheus resource's serviceMonitorSelector.
+    # Default kube-prometheus-stack selector: release=kube-prometheus-stack
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-inference
+
+  # Target only the ClusterIP service (not the LoadBalancer) for scraping.
+  # The LB service adds an extra hop and its IP changes with minikube tunnel restarts.
+  endpoints:
+  - port: http
+    path: /metrics
+    # 15s scrape interval provides 1s metric resolution in Prometheus queries,
+    # sufficient for the 15s KEDA polling interval. Shorter intervals increase
+    # Prometheus storage and query overhead without meaningful KEDA benefit.
+    interval: 15s
+    scrapeTimeout: 10s
+
+    # relabelings preserve the pod name and node as metric labels.
+    # This enables per-pod breakdowns in Grafana without requiring the
+    # application to emit pod-specific label values itself.
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_node_name]
+      targetLabel: node
+
+  namespaceSelector:
+    matchNames:
+    - vortex-inference

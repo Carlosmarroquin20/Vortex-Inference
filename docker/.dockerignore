@@ -1,0 +1,30 @@
+# Exclude model files — they are mounted at runtime via PersistentVolumeClaim.
+# Including them in the build context would cause multi-GB docker build payloads
+# and couple the container image lifecycle to the model version lifecycle.
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# Development artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local environment — never baked into production images
+.env
+.env.*
+
+# Kubernetes manifests are not part of the application runtime
+k8s/
+scripts/
+
+# Version control
+.git/
+.gitignore

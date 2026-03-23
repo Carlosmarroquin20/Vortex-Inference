@@ -1,0 +1,62 @@
+---
+# Dedicated namespace provides hard isolation boundaries for:
+#   - RBAC scope: ServiceAccount permissions are namespace-scoped by default
+#   - NetworkPolicy enforcement: cross-namespace traffic requires explicit Allow rules
+#   - ResourceQuota: aggregate limits prevent one workload from starving others
+#   - LimitRange: sets default requests/limits for pods that omit them (defense-in-depth)
+#
+# In a production multi-tenant cluster, this namespace would correspond to one
+# team or service boundary, each with its own KEDA ScaledObjects and Prometheus
+# scrape configurations.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vortex-inference
+  labels:
+    app.kubernetes.io/part-of: vortex-inference
+    # Pod Security Standards label — "restricted" enforces non-root, no privilege
+    # escalation, and seccomp profiles at the namespace level without per-pod spec.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+# ResourceQuota caps aggregate resource consumption for the namespace.
+# Rationale: on a 12GB Minikube node, 3 replicas × 4Gi = 12Gi is the hard ceiling.
+# Setting namespace quota to 13Gi (slightly above 3×4Gi) leaves headroom for
+# one in-progress rolling update pod before the quota blocks the rollout.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vortex-inference-quota
+  namespace: vortex-inference
+spec:
+  hard:
+    requests.memory: "6Gi"
+    limits.memory: "13Gi"
+    requests.cpu: "4"
+    limits.cpu: "12"
+    pods: "6"  # 3 inference pods + 3 rolling-update surge pods
+
+---
+# LimitRange sets defaults for any pod spec that omits resource fields.
+# This prevents unbounded resource consumption from misconfigured workloads
+# sharing the namespace and ensures Kubernetes can bin-pack pods correctly.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: vortex-inference-limits
+  namespace: vortex-inference
+spec:
+  limits:
+  - type: Container
+    default:
+      memory: "512Mi"
+      cpu: "500m"
+    defaultRequest:
+      memory: "256Mi"
+      cpu: "100m"
+    max:
+      memory: "4Gi"
+      cpu: "4"

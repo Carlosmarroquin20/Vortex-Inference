@@ -1,0 +1,221 @@
+---
+# PrometheusRule CRD — requires prometheus-operator (included in kube-prometheus-stack).
+# These rules define the SLOs for the inference service and the alerts that
+# enforce them. The alerting philosophy here is: alert on symptoms, not causes.
+# "High P99 latency" is a symptom. "CPU throttling" is a cause — let dashboards
+# surface causes; let alerts surface symptoms that require immediate action.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vortex-inference-rules
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: monitoring
+    # This label is required by kube-prometheus-stack's default ruleSelector.
+    # Without it, Prometheus will not discover and load this rule file.
+    release: kube-prometheus-stack
+    role: alert-rules
+spec:
+  groups:
+  # ---------------------------------------------------------------------------
+  # Recording Rules — pre-aggregated metrics for dashboard performance
+  # ---------------------------------------------------------------------------
+  - name: vortex.inference.recording
+    interval: 30s
+    rules:
+    # Pre-compute TPS rate to avoid repeating the rate() calculation in
+    # multiple dashboard panels. The 5m window smooths single-request spikes
+    # that would distort a capacity planning view.
+    - record: vortex:inference:tokens_per_second:rate5m
+      expr: >
+        rate(vortex_inference_tokens_generated_total{type="completion"}[5m])
+
+    # Request rate provides the denominator for error rate calculations.
+    - record: vortex:inference:request_rate:rate5m
+      expr: >
+        rate(vortex_inference_requests_total[5m])
+
+    # Error ratio: fraction of requests ending in "error" or "timeout" status.
+    # Separating "error" from "timeout" in the labels preserves the ability to
+    # distinguish application errors from infrastructure latency issues.
+    - record: vortex:inference:error_ratio:rate5m
+      expr: >
+        sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m]))
+        /
+        sum(rate(vortex_inference_requests_total[5m]))
+
+  # ---------------------------------------------------------------------------
+  # SLO Alerts — latency
+  # ---------------------------------------------------------------------------
+  - name: vortex.inference.slo.latency
+    rules:
+    # SLO: 95% of requests complete in under 10 seconds.
+    # P95 is the primary customer-facing SLO. P99 is tracked separately
+    # for capacity planning — chasing P99 in CPU-bound inference is often
+    # not cost-effective; the tail is dominated by long prompts, not instability.
+    - alert: VortexInferenceHighP95Latency
+      expr: >
+        histogram_quantile(0.95,
+          sum(rate(vortex_inference_duration_seconds_bucket[5m])) by (le)
+        ) > 10
+      for: 5m
+      labels:
+        severity: warning
+        team: mlops
+        slo: latency
+      annotations:
+        summary: "Inference P95 latency exceeds 10s SLO threshold"
+        description: >
+          P95 inference latency is {{ $value | humanizeDuration }},
+          breaching the 10s SLO. Common causes: insufficient replicas for
+          current request volume, max_tokens set too high by clients, or
+          node CPU throttling. Check KEDA ScaledObject status and active
+          request queue depth.
+        runbook_url: "https://github.com/your-org/vortex-inference/wiki/runbooks/high-latency"
+
+    # P99 > 30s indicates the tail distribution has degraded significantly.
+    # At this point, timeout errors become likely and user-visible.
+    - alert: VortexInferenceCriticalP99Latency
+      expr: >
+        histogram_quantile(0.99,
+          sum(rate(vortex_inference_duration_seconds_bucket[5m])) by (le)
+        ) > 30
+      for: 3m
+      labels:
+        severity: critical
+        team: mlops
+        slo: latency
+      annotations:
+        summary: "Inference P99 latency exceeds 30s — timeout errors imminent"
+        description: >
+          P99 inference latency is {{ $value | humanizeDuration }}.
+          Requests are approaching the 120s server-side timeout. Scale-out
+          may be blocked by the node's ResourceQuota or by slow pod startup.
+          Verify KEDA is functioning and check for pending pods.
+
+  # ---------------------------------------------------------------------------
+  # SLO Alerts — error rate
+  # ---------------------------------------------------------------------------
+  - name: vortex.inference.slo.availability
+    rules:
+    # SLO: error ratio < 1% over any 5-minute window.
+    - alert: VortexInferenceHighErrorRate
+      expr: vortex:inference:error_ratio:rate5m > 0.01
+      for: 5m
+      labels:
+        severity: warning
+        team: mlops
+        slo: availability
+      annotations:
+        summary: "Inference error rate exceeds 1% SLO"
+        description: >
+          Error ratio is {{ $value | humanizePercentage }} over the last 5m.
+          This includes both application errors (500) and timeout errors (504).
+          Check pod logs for model inference failures or OOM events.
+
+    - alert: VortexInferenceCriticalErrorRate
+      expr: vortex:inference:error_ratio:rate5m > 0.05
+      for: 3m
+      labels:
+        severity: critical
+        team: mlops
+        slo: availability
+      annotations:
+        summary: "Inference error rate exceeds 5% — service degraded"
+        description: >
+          Error ratio is {{ $value | humanizePercentage }}. The service is
+          in a degraded state. Possible causes: model file corruption,
+          kubelet OOM eviction, or a bug introduced by a recent deployment.
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure Alerts
+  # ---------------------------------------------------------------------------
+  - name: vortex.inference.infrastructure
+    rules:
+    # Detects when no pods are ready to serve traffic. This fires before
+    # users notice 503s because it triggers on readiness, not on error rates.
+    - alert: VortexInferenceNoReadyPods
+      expr: >
+        kube_deployment_status_replicas_ready{
+          namespace="vortex-inference",
+          deployment="vortex-inference"
+        } == 0
+      for: 2m
+      labels:
+        severity: critical
+        team: mlops
+      annotations:
+        summary: "No ready inference pods — all traffic is being dropped"
+        description: >
+          The vortex-inference Deployment has 0 ready replicas for 2 minutes.
+          Clients are receiving 503 responses. Check pod events for OOM kills,
+          image pull failures, or failed readiness probes.
+
+    # High queue depth without scale-out indicates KEDA or HPA is not functioning.
+    # Expected behavior: > 5 active requests should trigger a scale-out within
+    # pollingInterval (15s) + pod startup time (~90s).
+    - alert: VortexInferencePersistentQueuePressure
+      expr: >
+        sum(vortex_inference_active_requests{namespace="vortex-inference"}) > 5
+      for: 10m
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        summary: "High inference queue depth persisting for 10m — KEDA may be stalled"
+        description: >
+          Active request count is {{ $value }} and has not decreased in 10m.
+          If KEDA is functioning correctly, this should have triggered scale-out.
+          Check ScaledObject status: kubectl describe scaledobject vortex-inference-scaler -n vortex-inference
+
+    # Memory pressure alert: fires when a pod approaches 90% of its 4Gi limit.
+    # At this level, any allocation spike (e.g., a long context completion) risks
+    # triggering the Linux OOM killer inside the cgroup before kubelet can react.
+    - alert: VortexInferencePodHighMemoryUsage
+      expr: >
+        (
+          container_memory_working_set_bytes{
+            namespace="vortex-inference",
+            container="inference-server"
+          }
+          /
+          kube_pod_container_resource_limits{
+            namespace="vortex-inference",
+            container="inference-server",
+            resource="memory"
+          }
+        ) > 0.90
+      for: 5m
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        summary: "Inference pod memory usage above 90% of limit"
+        description: >
+          Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }}
+          of its 4Gi memory limit. Risk of OOM kill during next inference
+          request with a large context. Consider reducing VORTEX_N_CTX or
+          max_tokens in the ConfigMap, or increasing the memory limit.
+
+    # Model load failure detector: if a pod restarts more than twice in 15 minutes,
+    # it indicates a systematic startup failure (corrupt model, missing PVC mount,
+    # or persistent OOM during initialization).
+    - alert: VortexInferenceFrequentRestarts
+      expr: >
+        increase(
+          kube_pod_container_status_restarts_total{
+            namespace="vortex-inference",
+            container="inference-server"
+          }[15m]
+        ) > 2
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        summary: "Inference pod restarting frequently — model loading may be failing"
+        description: >
+          Pod {{ $labels.pod }} has restarted {{ $value }} times in the last 15m.
+          This pattern typically indicates OOM during model loading or a missing
+          model file at the PVC mount path. Check pod logs:
+          kubectl logs {{ $labels.pod }} -n vortex-inference --previous

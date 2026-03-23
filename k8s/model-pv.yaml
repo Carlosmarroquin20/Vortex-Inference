@@ -1,0 +1,59 @@
+---
+# PersistentVolume using hostPath for Minikube single-node deployments.
+#
+# Production migration path: replace hostPath with a ReadWriteMany storage
+# class (e.g., EFS on AWS, Filestore on GCP, Azure Files) to allow multiple
+# pods on different nodes to mount the same model volume simultaneously.
+# The PVC spec below requires no changes for that migration — only the PV
+# spec changes, preserving the Deployment's configuration.
+#
+# hostPath is acceptable here because:
+#   1. Minikube is a single-node cluster — all pods run on the same node
+#   2. The model file is read-only after download
+#   3. No data durability requirements exist for immutable model weights
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vortex-model-pv
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: model-storage
+    # Type label enables selector-based PVC binding, preventing this PV
+    # from being claimed by unrelated workloads in other namespaces.
+    type: model-storage
+spec:
+  capacity:
+    storage: 5Gi  # Phi-3-mini Q4_K_M is ~2.4GB; 5Gi leaves room for future model swaps
+  accessModes:
+    - ReadOnlyMany  # Multiple pods can mount simultaneously — matches inference use case
+  persistentVolumeReclaimPolicy: Retain
+  # storageClassName must match the PVC's storageClassName exactly.
+  # "manual" is a convention for hostPath PVs in local clusters — it prevents
+  # the default StorageClass from interfering with static provisioning.
+  storageClassName: manual
+  hostPath:
+    # This path must exist inside the Minikube VM.
+    # Use: minikube ssh "sudo mkdir -p /data/models"
+    # Then copy the GGUF file with: minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models/
+    path: /data/models
+    type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vortex-model-pvc
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: model-storage
+spec:
+  accessModes:
+    - ReadOnlyMany
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 5Gi
+  selector:
+    matchLabels:
+      type: model-storage  # Ensures binding to the specific PV above
