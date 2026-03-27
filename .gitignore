@@ -6,15 +6,17 @@
 .env
 .env.local
 .env.*.local
-.env.example
 
 # =============================================================================
 # Model Files
 # GGUF/GGML weights are binary blobs ranging from 2GB to 70GB+.
 # They have no place in git history — use a model registry (HF Hub, S3, GCS)
 # or the provided download script for reproducible model provisioning.
+#
+# /models/ (leading slash) anchors the rule to the repo root, preventing it
+# from accidentally matching app/models/ or any other subdirectory named "models".
 # =============================================================================
-models/
+/models/
 *.gguf
 *.ggml
 *.bin
