@@ -23,7 +23,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -114,18 +114,18 @@ MODEL_LOAD_DURATION_SECONDS = Gauge(
 # Application State
 # ---------------------------------------------------------------------------
 # Module-level references avoid re-initialization on each request.
-llm: Optional[LLMLoader] = None
+llm: LLMLoader | None = None
 
 # The semaphore is initialized during lifespan startup, not at import time,
 # because asyncio primitives must be created inside a running event loop.
-_inference_semaphore: Optional[asyncio.Semaphore] = None
+_inference_semaphore: asyncio.Semaphore | None = None
 
 
 # ---------------------------------------------------------------------------
 # Application Lifespan
 # ---------------------------------------------------------------------------
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Manages the model lifecycle: load on startup, release on shutdown.
 
@@ -199,7 +199,7 @@ class CompletionRequest(BaseModel):
     max_tokens: int = Field(default=256, ge=1, le=2048)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    stop: Optional[list[str]] = Field(default=None, max_length=4)
+    stop: list[str] | None = Field(default=None, max_length=4)
 
     model_config = {"extra": "forbid"}
     # extra="forbid" prevents prompt injection via undocumented parameters
@@ -208,6 +208,7 @@ class CompletionRequest(BaseModel):
 
 class CompletionResponse(BaseModel):
     text: str
+    finish_reason: str  # "stop" = hit stop sequence; "length" = max_tokens reached
     tokens_prompt: int
     tokens_completion: int
     tokens_per_second: float
@@ -277,23 +278,29 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     If an immediate 429 were returned instead, the gauge would only reflect
     active (not queued) requests, and KEDA would underestimate true demand.
     """
-    if llm is None:
+    if llm is None or _inference_semaphore is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
 
     # Increment before entering the semaphore so that queued requests are
     # counted in the KEDA scaling signal. Do NOT move this inside the semaphore.
     INFERENCE_ACTIVE_REQUESTS.inc()
-    request_start = time.monotonic()
 
     try:
         async with _inference_semaphore:
+            # request_start is measured after acquiring the semaphore so that
+            # INFERENCE_DURATION_SECONDS reflects pure inference time, not queue
+            # wait. Queue depth is already observable via INFERENCE_ACTIVE_REQUESTS.
+            request_start = time.monotonic()
+
             # run_in_executor offloads the CPU-bound C++ inference call to a
             # thread, freeing the asyncio event loop to handle concurrent
             # health checks and metrics scrapes without stalling.
             # The default ThreadPoolExecutor is adequate because there is at
             # most one inference thread running at any time (semaphore=1).
+            # get_running_loop() is used instead of the deprecated get_event_loop():
+            # it raises RuntimeError explicitly if called outside a running loop.
             result = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
+                asyncio.get_running_loop().run_in_executor(
                     None,
                     llm.generate,
                     request.prompt,
@@ -326,6 +333,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
 
         return CompletionResponse(
             text=result["text"],
+            finish_reason=result["finish_reason"],
             tokens_prompt=result["tokens_prompt"],
             tokens_completion=result["tokens_completion"],
             tokens_per_second=tps,

@@ -7,6 +7,7 @@ promoted across environments (dev → staging → prod) by changing only the
 ConfigMap or Secret — not the image layer. No hardcoded paths or magic numbers.
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +56,16 @@ class Settings(BaseSettings):
     # Service's session affinity timeout and the client's read timeout.
     # Tuned for worst-case Phi-3-mini on 2 CPU threads at 2048 max_tokens.
     inference_timeout_seconds: float = 120.0
+
+    @field_validator("model_path")
+    @classmethod
+    def model_path_must_be_gguf(cls, v: str) -> str:
+        if not v.endswith(".gguf"):
+            raise ValueError(
+                f"model_path must point to a .gguf file, got: {v!r}. "
+                "Set VORTEX_MODEL_PATH to the correct path."
+            )
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="VORTEX_", case_sensitive=False

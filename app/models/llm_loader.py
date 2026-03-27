@@ -9,7 +9,6 @@ applied to the ML inference layer.
 """
 
 import logging
-from typing import Optional
 
 from llama_cpp import Llama
 
@@ -69,7 +68,7 @@ class LLMLoader:
         max_tokens: int,
         temperature: float,
         top_p: float,
-        stop: Optional[list[str]],
+        stop: list[str] | None,
     ) -> dict:
         """
         Synchronous inference call. Designed to be run in a ThreadPoolExecutor
@@ -90,6 +89,7 @@ class LLMLoader:
 
         return {
             "text": output["choices"][0]["text"].strip(),
+            "finish_reason": output["choices"][0]["finish_reason"],
             "tokens_prompt": output["usage"]["prompt_tokens"],
             "tokens_completion": output["usage"]["completion_tokens"],
         }
