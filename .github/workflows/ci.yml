@@ -1,0 +1,146 @@
+name: CI
+
+# Trigger on every push and PR to main.
+# Rationale: catching broken Dockerfiles or invalid k8s manifests before merge
+# is cheaper than a failed deployment to a shared environment. These checks
+# are intentionally lightweight — no cluster is provisioned, no model is
+# downloaded. The goal is fast feedback (< 3 minutes) on structural validity.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Python linting
+  # Validates code style and catches obvious errors without running the model.
+  # ruff is chosen over flake8/pylint for its speed (~100x faster) and its
+  # ability to replace isort, pyupgrade, and flake8 in a single binary.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff==0.4.4
+
+      - name: Run ruff check
+        # E and W: pycodestyle errors/warnings
+        # F: pyflakes (undefined names, unused imports)
+        # I: isort (import ordering)
+        run: ruff check app/ --select E,W,F,I --output-format=github
+
+      - name: Run ruff format check
+        # Fails if any file would be reformatted — enforces consistent style
+        # without auto-applying changes in CI (that belongs in pre-commit).
+        run: ruff format app/ --check
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Docker build
+  # Validates the multi-stage Dockerfile compiles successfully.
+  # llama-cpp-python compilation (~5–8 min) is the most common failure point
+  # when system library versions or CMake flags change.
+  # The built image is NOT pushed — it serves only as a build validity check.
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: vortex-inference:ci-${{ github.sha }}
+          # Cache layers between runs to avoid recompiling llama-cpp-python
+          # on every push. Cache hits reduce this job from ~8min to ~30s.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Kubernetes manifest validation
+  # Validates YAML structure and Kubernetes API schema without a live cluster.
+  # kubectl --dry-run=client catches field typos, missing required fields,
+  # and API version mismatches before they reach the cluster.
+  #
+  # Note: KEDA CRDs (ScaledObject) are not known to kubectl's built-in schema,
+  # so keda-autoscaler.yaml is validated for YAML syntax only via yq.
+  # ---------------------------------------------------------------------------
+  validate-k8s:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Install yq (YAML validator)
+        run: |
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
+      - name: Validate core manifests (kubectl dry-run)
+        # --dry-run=client validates against the built-in OpenAPI schema.
+        # The manifests reference a namespace that doesn't exist locally,
+        # so we validate each file individually rather than applying sequentially.
+        run: |
+          for manifest in \
+            k8s/namespace.yaml \
+            k8s/configmap.yaml \
+            k8s/model-pv.yaml \
+            k8s/deployment.yaml \
+            k8s/service.yaml \
+            k8s/monitoring/servicemonitor.yaml; do
+            echo "Validating: ${manifest}"
+            kubectl apply --dry-run=client -f "${manifest}" 2>&1 || {
+              echo "Validation failed for ${manifest}"
+              exit 1
+            }
+          done
+
+      - name: Validate KEDA and Prometheus CRDs (YAML syntax)
+        # CRD-based resources cannot be validated by kubectl without the CRDs
+        # installed. yq ensures the files are at minimum valid YAML with the
+        # expected top-level fields (apiVersion, kind, metadata, spec).
+        run: |
+          for manifest in \
+            k8s/keda-autoscaler.yaml \
+            k8s/monitoring/prometheus-rules.yaml; do
+            echo "Validating YAML syntax: ${manifest}"
+            yq eval 'has("apiVersion") and has("kind") and has("metadata") and has("spec")' \
+              "${manifest}" | grep -q "true" || {
+              echo "Invalid manifest structure: ${manifest}"
+              exit 1
+            }
+          done
+
+      - name: Check for hardcoded secrets
+        # Rudimentary secret scan: fails if any manifest contains patterns
+        # that suggest a committed credential. Not a substitute for a proper
+        # secret scanner (truffleHog, gitleaks) but catches obvious mistakes.
+        run: |
+          if grep -rE \
+            "(password|secret|token|api_key)\s*[:=]\s*['\"]?[A-Za-z0-9+/]{16,}" \
+            k8s/ --include="*.yaml"; then
+            echo "Potential hardcoded secret detected in k8s manifests."
+            exit 1
+          fi
+          echo "No hardcoded secrets detected."
