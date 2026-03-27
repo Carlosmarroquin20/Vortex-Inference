@@ -57,7 +57,5 @@ class Settings(BaseSettings):
     inference_timeout_seconds: float = 120.0
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_prefix="VORTEX_",
-        case_sensitive=False
+        env_file=".env", env_prefix="VORTEX_", case_sensitive=False
     )

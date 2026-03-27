@@ -160,9 +160,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     load_duration = time.monotonic() - load_start
     MODEL_LOAD_DURATION_SECONDS.set(load_duration)
     logger.info(
-        f"Model loaded. "
-        f"duration_seconds={load_duration:.2f} "
-        f"ready_for_traffic=true"
+        f"Model loaded. duration_seconds={load_duration:.2f} ready_for_traffic=true"
     )
 
     _inference_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
@@ -280,9 +278,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     active (not queued) requests, and KEDA would underestimate true demand.
     """
     if llm is None:
-        raise HTTPException(
-            status_code=503, detail="Inference engine not initialized."
-        )
+        raise HTTPException(status_code=503, detail="Inference engine not initialized.")
 
     # Increment before entering the semaphore so that queued requests are
     # counted in the KEDA scaling signal. Do NOT move this inside the semaphore.
@@ -310,9 +306,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             )
 
         duration = time.monotonic() - request_start
-        tps = (
-            result["tokens_completion"] / duration if duration > 0 else 0.0
-        )
+        tps = result["tokens_completion"] / duration if duration > 0 else 0.0
 
         INFERENCE_REQUESTS_TOTAL.labels(status="success").inc()
         INFERENCE_DURATION_SECONDS.observe(duration)

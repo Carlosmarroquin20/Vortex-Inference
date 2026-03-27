@@ -30,8 +30,11 @@ ENV CMAKE_ARGS="-DLLAMA_BLAS=ON -DLLAMA_BLAS_VENDOR=OpenBLAS"
 ENV FORCE_CMAKE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip wheel --no-cache-dir --wheel-dir=/dist llama-cpp-python && \
     pip wheel --no-cache-dir --wheel-dir=/dist -r requirements.txt
+# Single pip wheel invocation covers all dependencies including llama-cpp-python.
+# CMAKE_ARGS and FORCE_CMAKE set above are inherited here, ensuring the C++
+# compilation uses OpenBLAS. Running llama-cpp-python as a separate step
+# first caused version conflicts when GHA layer cache held a stale wheel.
 
 
 # =============================================================================
