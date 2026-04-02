@@ -21,6 +21,7 @@ Concurrency model:
 
 import asyncio
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -281,35 +282,86 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     if llm is None or _inference_semaphore is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
 
-    # Increment before entering the semaphore so that queued requests are
-    # counted in the KEDA scaling signal. Do NOT move this inside the semaphore.
+    # Increment before acquiring the semaphore so queued requests contribute to
+    # the KEDA scaling signal. Do NOT move this inside the semaphore.
     INFERENCE_ACTIVE_REQUESTS.inc()
 
-    try:
-        async with _inference_semaphore:
-            # request_start is measured after acquiring the semaphore so that
-            # INFERENCE_DURATION_SECONDS reflects pure inference time, not queue
-            # wait. Queue depth is already observable via INFERENCE_ACTIVE_REQUESTS.
-            request_start = time.monotonic()
+    _semaphore_acquired = False
+    _drain_pending = False
 
-            # run_in_executor offloads the CPU-bound C++ inference call to a
-            # thread, freeing the asyncio event loop to handle concurrent
-            # health checks and metrics scrapes without stalling.
-            # The default ThreadPoolExecutor is adequate because there is at
-            # most one inference thread running at any time (semaphore=1).
-            # get_running_loop() is used instead of the deprecated get_event_loop():
-            # it raises RuntimeError explicitly if called outside a running loop.
+    try:
+        await _inference_semaphore.acquire()
+        _semaphore_acquired = True
+
+        # request_start is measured after acquiring the semaphore so that
+        # INFERENCE_DURATION_SECONDS reflects pure inference time, not queue
+        # wait. Queue depth is already observable via INFERENCE_ACTIVE_REQUESTS.
+        request_start = time.monotonic()
+
+        stop_event = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        # asyncio.shield prevents wait_for from cancelling the executor future
+        # on timeout. The thread must run to completion before the semaphore is
+        # released — the Llama object is not thread-safe, and releasing the
+        # semaphore while the thread is still inside llm.generate() would allow
+        # a second request to enter, corrupting shared C++ model state.
+        fut = loop.run_in_executor(
+            None,
+            llm.generate,
+            request.prompt,
+            request.max_tokens,
+            request.temperature,
+            request.top_p,
+            request.stop,
+            stop_event,
+        )
+
+        try:
             result = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(
-                    None,
-                    llm.generate,
-                    request.prompt,
-                    request.max_tokens,
-                    request.temperature,
-                    request.top_p,
-                    request.stop,
+                asyncio.shield(fut), timeout=settings.inference_timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            # Signal llama.cpp to stop at the next token boundary via the
+            # stopping_criteria callback in LLMLoader.generate().
+            stop_event.set()
+
+            # Hold the semaphore until the thread exits. A background task
+            # does this so the 504 response is returned to the client
+            # immediately rather than blocking on the draining thread.
+            _drain_pending = True
+
+            # Capture the semaphore object by value so the background task
+            # releases the correct instance even if the module-level reference
+            # is replaced (e.g., during a shutdown/restart cycle).
+            _sem = _inference_semaphore
+
+            async def _drain_and_release() -> None:
+                try:
+                    await fut
+                except Exception:
+                    pass
+                finally:
+                    _sem.release()
+                    INFERENCE_ACTIVE_REQUESTS.dec()
+                    logger.info(
+                        "Timed-out inference thread drained. Semaphore released."
+                    )
+
+            asyncio.create_task(_drain_and_release())
+
+            INFERENCE_REQUESTS_TOTAL.labels(status="timeout").inc()
+            logger.error(
+                f"Inference timeout after {settings.inference_timeout_seconds}s. "
+                f"Consider reducing max_tokens or scaling out replicas."
+            )
+            timeout_s = settings.inference_timeout_seconds
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"Inference exceeded {timeout_s}s timeout. "
+                    "Reduce max_tokens or retry when the service has scaled out."
                 ),
-                timeout=settings.inference_timeout_seconds,
             )
 
         duration = time.monotonic() - request_start
@@ -341,35 +393,22 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             model=settings.model_name,
         )
 
-    except asyncio.TimeoutError:
-        INFERENCE_REQUESTS_TOTAL.labels(status="timeout").inc()
-        logger.error(
-            f"Inference timeout after {settings.inference_timeout_seconds}s. "
-            f"Consider reducing max_tokens or scaling out replicas."
-        )
-        raise HTTPException(
-            status_code=504,
-            detail=(
-                f"Inference exceeded {settings.inference_timeout_seconds}s timeout. "
-                "Reduce max_tokens or retry when the service has scaled out."
-            ),
-        )
+    except HTTPException:
+        raise
 
     except Exception as exc:
         INFERENCE_REQUESTS_TOTAL.labels(status="error").inc()
         logger.error(f"Inference failed. error={exc}")
-        # TODO: Implement circuit breaker pattern if upstream inference error rate
-        # exceeds 10% over a 60s window — prevents cascading failures where a
-        # corrupt model state causes all replicas to fail simultaneously.
         raise HTTPException(status_code=500, detail=f"Inference error: {exc}")
 
     finally:
-        # CRITICAL: gauge decrement is in finally to prevent metric leaks on
-        # any exit path (success, timeout, error). A leaked increment would
-        # permanently inflate the KEDA scaling signal, causing the autoscaler
-        # to maintain more replicas than necessary — a resource waste that
-        # compounds in multi-tenant environments.
-        INFERENCE_ACTIVE_REQUESTS.dec()
+        # On the timeout path, _drain_and_release() owns the semaphore release
+        # and gauge decrement once the thread exits. All other paths (success,
+        # error, client disconnect during queue wait) are handled here.
+        if not _drain_pending:
+            if _semaphore_acquired:
+                _inference_semaphore.release()
+            INFERENCE_ACTIVE_REQUESTS.dec()
 
 
 # ---------------------------------------------------------------------------

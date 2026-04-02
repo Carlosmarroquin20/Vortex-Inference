@@ -9,6 +9,7 @@ applied to the ML inference layer.
 """
 
 import logging
+import threading
 
 from llama_cpp import Llama
 
@@ -69,6 +70,7 @@ class LLMLoader:
         temperature: float,
         top_p: float,
         stop: list[str] | None,
+        stop_event: threading.Event | None = None,
     ) -> dict:
         """
         Synchronous inference call. Designed to be run in a ThreadPoolExecutor
@@ -77,7 +79,18 @@ class LLMLoader:
         echo=False is critical: it prevents the model from including the prompt
         tokens in the output string, which would corrupt downstream parsing
         and inflate completion token counts.
+
+        stop_event: when set by the async layer (e.g. on client timeout), the
+        stopping_criteria callback tells llama.cpp to halt at the next token
+        boundary. This lets the thread exit cleanly so the semaphore in main.py
+        can be released without racing against an in-progress C++ call.
         """
+        stopping_criteria = None
+        if stop_event is not None:
+
+            def stopping_criteria(tokens: list[int], scores: list[float]) -> bool:
+                return stop_event.is_set()
+
         output = self._model(
             prompt,
             max_tokens=max_tokens,
@@ -85,6 +98,7 @@ class LLMLoader:
             top_p=top_p,
             stop=stop or [],
             echo=False,
+            stopping_criteria=stopping_criteria,
         )
 
         return {
