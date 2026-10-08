@@ -62,13 +62,15 @@ COPY app/ ./app/
 # Kubernetes PodSecurityPolicy / Pod Security Standards (restricted) require
 # runAsNonRoot=true; this satisfies that constraint without image rebuilds.
 RUN useradd --create-home --uid 1000 --shell /bin/sh vortex
-USER vortex
 
 # Model files are mounted via PersistentVolumeClaim at /models.
 # The directory is created here so the mount target exists before the
 # volume is attached — Kubernetes will not create the path automatically
 # on hostPath or NFS mounts if it does not exist in the image.
-RUN mkdir -p /models
+# Must run before USER: an unprivileged user cannot create directories in /.
+RUN mkdir -p /models && chown vortex:vortex /models
+
+USER vortex
 
 EXPOSE 8080
 

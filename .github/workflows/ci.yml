@@ -22,10 +22,10 @@ jobs:
     name: Lint Python
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -54,13 +54,13 @@ jobs:
     name: Build Docker Image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build image (no push)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -74,22 +74,26 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job 3: Kubernetes manifest validation
   # Validates YAML structure and Kubernetes API schema without a live cluster.
-  # kubectl --dry-run=client catches field typos, missing required fields,
-  # and API version mismatches before they reach the cluster.
+  # kubeconform checks manifests against the published OpenAPI JSON schemas,
+  # catching field typos, missing required fields, and API version mismatches
+  # before they reach the cluster.
   #
-  # Note: KEDA CRDs (ScaledObject) are not known to kubectl's built-in schema,
-  # so keda-autoscaler.yaml is validated for YAML syntax only via yq.
+  # kubectl --dry-run=client is deliberately not used: even in client mode it
+  # performs API discovery against a server to resolve resource mappings, so
+  # it fails with "connection refused" on a runner with no cluster.
+  #
+  # Note: KEDA CRDs (ScaledObject) are not part of the core schema set, so
+  # keda-autoscaler.yaml is validated for YAML syntax only via yq.
   # ---------------------------------------------------------------------------
   validate-k8s:
     name: Validate Kubernetes Manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "v1.30.0"
+      - name: Install kubeconform
+        run: |
+          curl -fsSL             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz             | sudo tar -xz -C /usr/local/bin kubeconform
 
       - name: Install yq (YAML validator)
         run: |
@@ -97,26 +101,14 @@ jobs:
             https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
           chmod +x /usr/local/bin/yq
 
-      - name: Validate core manifests (kubectl dry-run)
-        # --dry-run=client parses and validates manifests using kubectl's
-        # built-in client-side schema only — no cluster connection required.
-        # --validate=false skips the OpenAPI schema download that triggers
-        # a connection attempt to localhost:8080 even in client mode.
-        # Trade-off: we lose deep field validation but retain structural
-        # parsing, which catches YAML errors and missing required fields.
+      - name: Validate core manifests (kubeconform)
+        # Fully offline with respect to the cluster: schemas are fetched from
+        # the public kubernetes-json-schema repository, pinned to the same
+        # Kubernetes version the deployment targets.
+        # -strict rejects unknown and duplicated fields, which is where most
+        # indentation and typo mistakes surface.
         run: |
-          for manifest in \
-            k8s/namespace.yaml \
-            k8s/configmap.yaml \
-            k8s/model-pv.yaml \
-            k8s/deployment.yaml \
-            k8s/service.yaml; do
-            echo "Validating: ${manifest}"
-            kubectl apply --dry-run=client --validate=false -f "${manifest}" 2>&1 || {
-              echo "Validation failed for ${manifest}"
-              exit 1
-            }
-          done
+          kubeconform -strict -summary -kubernetes-version 1.30.0             k8s/namespace.yaml             k8s/configmap.yaml             k8s/model-pv.yaml             k8s/deployment.yaml             k8s/service.yaml
 
       - name: Validate CRD-based manifests (YAML syntax via yq)
         # Resources using third-party API groups (keda.sh, monitoring.coreos.com)
