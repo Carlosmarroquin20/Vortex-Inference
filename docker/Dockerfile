@@ -24,9 +24,14 @@ COPY requirements.txt .
 # which is approximately 1.5–2x slower for the matrix-vector products
 # dominating autoregressive token generation on x86 CPUs.
 #
-# GPU transition path: replace with CMAKE_ARGS="-DLLAMA_CUBLAS=on" and add
-# --gpus flags to the container runtime to offload layers to VRAM.
-ENV CMAKE_ARGS="-DLLAMA_BLAS=ON -DLLAMA_BLAS_VENDOR=OpenBLAS"
+# The GGML_ prefix is required: llama.cpp renamed its build options from
+# LLAMA_* to GGML_* and llama-cpp-python 0.2.80+ silently ignores the old
+# names, producing a working but BLAS-less binary. The runtime stage asserts
+# that BLAS was actually linked so this cannot regress unnoticed.
+#
+# GPU transition path: replace with CMAKE_ARGS="-DGGML_CUDA=on", switch to a
+# CUDA base image, and add --gpus flags to offload layers to VRAM.
+ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
 ENV FORCE_CMAKE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -42,9 +47,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # =============================================================================
 FROM python:3.11-slim AS runtime
 
-# Only the shared library for OpenBLAS is needed at runtime — not the
-# dev headers or the compiler toolchain.
+# Only the shared libraries are needed at runtime — not the dev headers or
+# the compiler toolchain. libgomp1 is the OpenMP runtime: llama.cpp builds
+# with OpenMP threading by default, and the builder gets it implicitly from
+# build-essential, so its absence here only shows up when libllama.so loads.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
     libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -55,6 +63,15 @@ WORKDIR /app
 # efficient — the wheels layer only invalidates when requirements.txt changes.
 COPY --from=builder /dist /dist
 RUN pip install --no-cache-dir /dist/*.whl && rm -rf /dist
+
+# Build-time guard: load the native library and fail the build if the BLAS
+# backend is not compiled in, or if a shared library the wheel depends on is
+# missing from this slimmer runtime image. Both would otherwise surface only
+# when the pod starts in the cluster.
+RUN python -c "import sys, llama_cpp; \
+info = llama_cpp.llama_print_system_info().decode(); \
+print(info); \
+sys.exit(0 if 'BLAS = 1' in info else 'llama.cpp was built without BLAS support')"
 
 COPY app/ ./app/
 
