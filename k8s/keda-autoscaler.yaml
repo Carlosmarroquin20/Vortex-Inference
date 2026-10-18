@@ -36,8 +36,11 @@ spec:
   # the correct trade-off between resource efficiency and availability.
   minReplicaCount: 1
 
-  # maxReplicaCount=3 is constrained by node memory:
-  #   3 pods × 4Gi limit = 12Gi, matching available Minikube node RAM.
+  # maxReplicaCount=3 is constrained by node capacity, not by the quota:
+  #   memory: 3 × 2Gi requests = 6Gi on a 10Gi node (limits overcommit by
+  #           design; pods are Burstable and peak only during model load)
+  #   cpu:    3 × 2 CPU requests = 6 CPU, the whole node at MINIKUBE_CPUS=6.
+  #           The third replica only schedules if system pods leave headroom.
   # In a production cluster with GPU nodes, this value would be driven by
   # cost/latency SLOs, not hardware limits.
   maxReplicaCount: 3

@@ -23,9 +23,18 @@ metadata:
 
 ---
 # ResourceQuota caps aggregate resource consumption for the namespace.
-# Rationale: on a 12GB Minikube node, 3 replicas × 4Gi = 12Gi is the hard ceiling.
-# Setting namespace quota to 13Gi (slightly above 3×4Gi) leaves headroom for
-# one in-progress rolling update pod before the quota blocks the rollout.
+#
+# Sizing: the quota must admit KEDA's maxReplicaCount (3) plus the single
+# rolling-update surge pod (maxSurge=1), i.e. 4 inference pods at once.
+# Per pod: requests 2 CPU / 2Gi, limits 3.5 CPU / 4Gi.
+#   requests.cpu    4 × 2    = 8
+#   requests.memory 4 × 2Gi  = 8Gi
+#   limits.cpu      4 × 3.5  = 14
+#   limits.memory   4 × 4Gi  = 16Gi
+# A tighter quota fails silently from KEDA's point of view: the HPA raises
+# spec.replicas, the ReplicaSet controller gets "exceeded quota", and no
+# pod is ever created. Actual placement is still bounded by node capacity;
+# the quota only guards against runaway consumption inside the namespace.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -33,11 +42,11 @@ metadata:
   namespace: vortex-inference
 spec:
   hard:
-    requests.memory: "6Gi"
-    limits.memory: "13Gi"
-    requests.cpu: "4"
-    limits.cpu: "12"
-    pods: "6"  # 3 inference pods + 3 rolling-update surge pods
+    requests.memory: "8Gi"
+    limits.memory: "16Gi"
+    requests.cpu: "8"
+    limits.cpu: "14"
+    pods: "6"  # 4 inference pods at peak rollout, plus room for debug pods
 
 ---
 # LimitRange sets defaults for any pod spec that omits resource fields.

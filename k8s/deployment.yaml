@@ -22,9 +22,9 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      # maxSurge=1 allows one additional pod during rollout, briefly doubling
-      # memory usage on the node. On a 12GB node with 4Gi per pod, two pods
-      # simultaneously = 8Gi, staying within the ResourceQuota.
+      # maxSurge=1 allows one additional pod during rollout. At maxReplicaCount
+      # this means 4 pods coexist briefly; the namespace ResourceQuota is sized
+      # for exactly that peak (see namespace.yaml).
       maxSurge: 1
       # maxUnavailable=0 enforces zero-downtime deployments. The new pod must
       # pass its readiness probe before the old pod is terminated.
