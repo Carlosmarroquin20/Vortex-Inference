@@ -167,14 +167,15 @@ logs:
 		--prefix
 
 metrics:
-	# Port-forwards directly to a single pod to retrieve raw Prometheus metrics.
-	# Useful for verifying that custom metric names and label values are correct
-	# before checking whether the ServiceMonitor is scraping them.
+	# Reads raw Prometheus metrics from a single pod through the API server's
+	# pod proxy. Useful for verifying metric names and label values before
+	# checking whether the ServiceMonitor is scraping them. The proxy is used
+	# instead of kubectl exec because the slim image ships no HTTP client.
 	@printf "$(GREEN)[metrics]$(NC) Fetching Prometheus metrics from inference pod...\n"
 	@POD=$$(kubectl get pod -n $(NAMESPACE) -l app.kubernetes.io/name=$(IMAGE_NAME) \
 		-o jsonpath='{.items[0].metadata.name}') && \
-	kubectl exec -n $(NAMESPACE) $$POD -- \
-		wget -qO- http://localhost:8080/metrics | grep -E "^vortex_"
+	kubectl get --raw "/api/v1/namespaces/$(NAMESPACE)/pods/$$POD:8080/proxy/metrics" \
+		| grep -E "^vortex_"
 
 tunnel:
 	@printf "$(YELLOW)[tunnel]$(NC) Starting minikube tunnel — keep this terminal open.\n"

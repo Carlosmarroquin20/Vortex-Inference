@@ -92,22 +92,29 @@ get_replica_count() {
 }
 
 get_active_requests() {
-    # Queries the metric directly from the pod rather than through Prometheus,
-    # providing real-time data without waiting for the scrape interval.
-    local pod
-    pod=$(kubectl get pod -n "${NAMESPACE}" \
+    # Queries the gauge directly from every pod rather than through Prometheus,
+    # providing real-time data without waiting for the scrape interval. Values
+    # are summed to match the sum() aggregation in the KEDA trigger query.
+    # The API server pod proxy is used because the slim image has no HTTP
+    # client for kubectl exec. Pods still loading the model contribute 0.
+    local pods pod value total=0
+    pods=$(kubectl get pod -n "${NAMESPACE}" \
         -l app.kubernetes.io/name=vortex-inference \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
 
-    if [ -z "${pod}" ]; then
+    if [ -z "${pods}" ]; then
         echo "N/A"
         return
     fi
 
-    kubectl exec -n "${NAMESPACE}" "${pod}" -- \
-        wget -qO- http://localhost:8080/metrics 2>/dev/null \
-        | grep "^vortex_inference_active_requests " \
-        | awk '{printf "%.0f", $2}' || echo "0"
+    for pod in ${pods}; do
+        value=$(kubectl get --raw \
+            "/api/v1/namespaces/${NAMESPACE}/pods/${pod}:8080/proxy/metrics" 2>/dev/null \
+            | awk '/^vortex_inference_active_requests /{printf "%.0f", $2}' || true)
+        total=$(( total + ${value:-0} ))
+    done
+
+    echo "${total}"
 }
 
 send_request() {
