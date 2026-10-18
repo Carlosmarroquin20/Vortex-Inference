@@ -1,0 +1,41 @@
+# Docker reads .dockerignore only from the root of the build context, which
+# is the repository root (see `docker build -f docker/Dockerfile .`). A copy
+# inside docker/ is silently ignored.
+#
+# Patterns are anchored to the context root, so recursive matches need an
+# explicit **/ prefix. Root-only entries such as models/ intentionally do
+# not match app/models/, which contains application code.
+
+# Exclude model files — they are mounted at runtime via PersistentVolumeClaim.
+# Including them in the build context would cause multi-GB docker build payloads
+# and couple the container image lifecycle to the model version lifecycle.
+models/
+**/*.gguf
+**/*.bin
+**/*.safetensors
+
+# Development artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+**/*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Local environment — never baked into production images
+.env
+.env.*
+
+# Kubernetes manifests, scripts and CI config are not part of the runtime
+k8s/
+scripts/
+.github/
+
+# Version control
+.git/
+.gitignore
