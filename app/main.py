@@ -20,6 +20,7 @@ Concurrency model:
 """
 
 import asyncio
+import hmac
 import logging
 import threading
 import time
@@ -27,7 +28,8 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -166,6 +168,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _inference_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
 
+    if settings.api_key is None:
+        logger.warning(
+            "VORTEX_API_KEY is not set. /v1/completions accepts unauthenticated "
+            "requests; this is only acceptable for local development."
+        )
+    else:
+        logger.info("API key authentication enabled for /v1/completions.")
+
     yield  # ← Application serves traffic here
 
     # Graceful shutdown: allow the semaphore to drain in-flight requests
@@ -190,6 +200,43 @@ app = FastAPI(
     # docs_url=None,
     # redoc_url=None,
 )
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+# auto_error=False lets the dependency decide: when no key is configured the
+# header is irrelevant, and when one is configured a missing header and a
+# wrong token both map to the same 401 instead of FastAPI's default 403.
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def require_api_key(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> None:
+    """
+    Enforces the shared bearer token when VORTEX_API_KEY is configured.
+
+    Bearer is used rather than a custom header so that OpenAI SDK clients,
+    which always send `Authorization: Bearer <key>`, work unchanged.
+    /health and /metrics stay unauthenticated: kubelet probes and the
+    Prometheus scraper cannot attach credentials without extra plumbing, and
+    neither endpoint triggers inference.
+    """
+    if settings.api_key is None:
+        return
+
+    expected = settings.api_key.get_secret_value().encode()
+    provided = credentials.credentials.encode() if credentials else b""
+
+    # Constant-time comparison so response timing does not leak how many
+    # leading characters of a guessed key were correct.
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +310,12 @@ async def prometheus_metrics() -> Response:
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@app.post("/v1/completions", response_model=CompletionResponse, tags=["inference"])
+@app.post(
+    "/v1/completions",
+    response_model=CompletionResponse,
+    tags=["inference"],
+    dependencies=[Depends(require_api_key)],
+)
 async def create_completion(request: CompletionRequest) -> CompletionResponse:
     """
     Primary inference endpoint. Path mirrors the OpenAI API for drop-in

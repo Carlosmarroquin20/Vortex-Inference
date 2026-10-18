@@ -123,8 +123,10 @@ minikube tunnel  # Run in a separate terminal
 
 # 9. Test inference
 INFERENCE_IP=$(kubectl get svc vortex-inference-lb -n vortex-inference -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+API_KEY=$(make --no-print-directory show-api-key)
 curl -X POST "http://${INFERENCE_IP}/v1/completions" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${API_KEY}" \
   -d '{"prompt": "Explain transformer attention in one paragraph:", "max_tokens": 200}'
 ```
 

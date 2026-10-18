@@ -115,6 +115,19 @@ spec:
         - configMapRef:
             name: vortex-inference-config
 
+        # The API key is sourced from a Secret rather than the ConfigMap so it
+        # never lands in version control. The Secret is generated out-of-band
+        # by `make api-key`. optional=false is deliberate: a pod without the key
+        # would start serving unauthenticated traffic on a LoadBalancer, so a
+        # missing Secret must block startup (CreateContainerConfigError) instead.
+        env:
+        - name: VORTEX_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-api-key
+              key: api-key
+              optional: false
+
         # ---------------------------------------------------------------------------
         # Resource Management
         # ---------------------------------------------------------------------------

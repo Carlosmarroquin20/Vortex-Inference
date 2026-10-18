@@ -94,6 +94,15 @@ log_warn "  minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models
 log_info "Applying Kubernetes manifests..."
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
+
+# The Deployment requires this Secret to start. It is created only when
+# missing so that re-running the bootstrap never rotates a key clients use.
+if ! kubectl get secret vortex-inference-api-key -n "${NAMESPACE}" &>/dev/null; then
+  kubectl create secret generic vortex-inference-api-key \
+    -n "${NAMESPACE}" \
+    --from-literal=api-key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  log_info "API key Secret created. Read it with: make show-api-key"
+fi
 kubectl apply -f k8s/model-pv.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/monitoring/prometheus-rules.yaml

@@ -19,6 +19,7 @@ SHELL := /bin/bash
 NAMESPACE        := vortex-inference
 IMAGE_NAME       := vortex-inference
 IMAGE_TAG        := 1.0.0
+API_KEY_SECRET   := vortex-inference-api-key
 KEDA_VERSION     := 2.14.0
 PROM_STACK_VER   := 58.4.0
 MINIKUBE_MEMORY  := 10240
@@ -36,7 +37,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build deploy undeploy status logs metrics test load-test tunnel clean
+.PHONY: help setup model build api-key show-api-key deploy undeploy status logs metrics test load-test tunnel clean
 
 # =============================================================================
 # Default target — always show help first
@@ -51,6 +52,7 @@ help:
 	@printf "    make setup       Start Minikube, install KEDA + kube-prometheus-stack\n"
 	@printf "    make model       Download Phi-3-mini GGUF model (~2.4GB)\n"
 	@printf "    make build       Build Docker image inside Minikube daemon\n"
+	@printf "    make api-key     Create the API key Secret if it does not exist\n"
 	@printf "    make deploy      Apply all Kubernetes manifests\n"
 	@echo ""
 	@printf "  $(GREEN)Operations$(NC)\n"
@@ -94,9 +96,28 @@ build:
 			.
 	@printf "$(GREEN)[build]$(NC) Image $(FULL_IMAGE) built successfully.\n"
 
-deploy:
-	@printf "$(GREEN)[deploy]$(NC) Applying Kubernetes manifests to namespace $(NAMESPACE)...\n"
+api-key:
+	# Generates the API key Secret only when it is missing, so re-running deploy
+	# never rotates a key that clients already hold. The key is kept out of
+	# version control entirely; rotate it with:
+	#   kubectl delete secret $(API_KEY_SECRET) -n $(NAMESPACE) && make api-key
 	@kubectl apply -f k8s/namespace.yaml
+	@if kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) >/dev/null 2>&1; then \
+		printf "$(GREEN)[api-key]$(NC) Secret $(API_KEY_SECRET) already exists. Keeping current key.\n"; \
+	else \
+		kubectl create secret generic $(API_KEY_SECRET) \
+			-n $(NAMESPACE) \
+			--from-literal=api-key="$$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"; \
+		printf "$(GREEN)[api-key]$(NC) Secret $(API_KEY_SECRET) created.\n"; \
+	fi
+	@printf "$(GREEN)[api-key]$(NC) Read it with: make show-api-key\n"
+
+show-api-key:
+	@kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) \
+		-o jsonpath='{.data.api-key}' | base64 -d; echo
+
+deploy: api-key
+	@printf "$(GREEN)[deploy]$(NC) Applying Kubernetes manifests to namespace $(NAMESPACE)...\n"
 	@kubectl apply -f k8s/configmap.yaml
 	@kubectl apply -f k8s/model-pv.yaml
 	@kubectl apply -f k8s/service.yaml
@@ -173,9 +194,12 @@ test:
 		printf "$(RED)[test]$(NC) LoadBalancer IP not assigned. Is 'make tunnel' running?\n"; \
 		exit 1; \
 	fi; \
+	API_KEY=$$(kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) \
+		-o jsonpath='{.data.api-key}' | base64 -d); \
 	printf "$(GREEN)[test]$(NC) Endpoint: http://$$INFERENCE_IP/v1/completions\n"; \
 	curl -s -X POST "http://$$INFERENCE_IP/v1/completions" \
 		-H "Content-Type: application/json" \
+		-H "Authorization: Bearer $$API_KEY" \
 		-d '{"prompt": "In one sentence, what is Kubernetes?", "max_tokens": 60}' \
 		| python3 -m json.tool
 

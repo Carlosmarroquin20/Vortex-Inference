@@ -7,7 +7,7 @@ promoted across environments (dev → staging → prod) by changing only the
 ConfigMap or Secret — not the image layer. No hardcoded paths or magic numbers.
 """
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +56,22 @@ class Settings(BaseSettings):
     # Service's session affinity timeout and the client's read timeout.
     # Tuned for worst-case Phi-3-mini on 2 CPU threads at 2048 max_tokens.
     inference_timeout_seconds: float = 120.0
+
+    # --- Security ---
+    # Shared bearer token for /v1/completions. Authentication is enforced only
+    # when this is set, so local development runs without ceremony while the
+    # cluster deployment always injects it from a Secret. SecretStr keeps the
+    # value out of reprs and log lines if the settings object is ever printed.
+    api_key: SecretStr | None = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def blank_api_key_disables_auth(cls, v: object) -> object:
+        # An empty VORTEX_API_KEY= line in .env should mean "no auth", not
+        # "every request must send an empty token".
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @field_validator("model_path")
     @classmethod

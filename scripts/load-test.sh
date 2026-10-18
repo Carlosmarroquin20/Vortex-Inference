@@ -54,6 +54,7 @@ MAX_TOKENS=${3:-80}
 
 NAMESPACE="vortex-inference"
 SVCNAME="vortex-inference-lb"
+API_KEY_SECRET="vortex-inference-api-key"
 
 # Test prompts — varied to avoid KV-cache hits that would shorten inference time.
 # Shorter active_requests windows produce weaker KEDA signals.
@@ -76,6 +77,12 @@ get_inference_ip() {
     kubectl get svc "${SVCNAME}" \
         -n "${NAMESPACE}" \
         -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo ""
+}
+
+get_api_key() {
+    kubectl get secret "${API_KEY_SECRET}" \
+        -n "${NAMESPACE}" \
+        -o jsonpath='{.data.api-key}' 2>/dev/null | base64 -d 2>/dev/null || echo ""
 }
 
 get_replica_count() {
@@ -119,6 +126,7 @@ send_request() {
         --max-time 150 \
         -X POST "${endpoint}/v1/completions" \
         -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${API_KEY}" \
         -d "{\"prompt\": \"${prompt}\", \"max_tokens\": ${MAX_TOKENS}, \"temperature\": 0.7}" \
         2>/dev/null || echo "000")
 
@@ -199,6 +207,12 @@ if [ -z "${INFERENCE_IP}" ]; then
 fi
 
 ENDPOINT="http://${INFERENCE_IP}"
+
+API_KEY=$(get_api_key)
+if [ -z "${API_KEY}" ]; then
+    log_error "API key Secret '${API_KEY_SECRET}' not found. Run 'make api-key' first."
+    exit 1
+fi
 log_info "Target endpoint: ${ENDPOINT}/v1/completions"
 
 # Verify the pod is healthy before starting the test
