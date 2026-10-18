@@ -7,16 +7,20 @@ llama-cpp-python==0.2.90
 # HTTP framework
 # FastAPI is chosen over Flask for native async support — critical for serving
 # concurrent health checks and metrics scrapes without blocking the inference thread.
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+
+# Starlette is pinned explicitly even though FastAPI pulls it in transitively.
+# Older FastAPI releases capped it below 0.38, which kept several published
+# request-parsing CVEs in the image. Pinning it here makes the security-relevant
+# version visible in review and to dependency scanners instead of leaving it to
+# the resolver.
+starlette==1.7.0
 
 # Configuration management via Pydantic v2
-pydantic==2.7.1
-pydantic-settings==2.2.1
+pydantic==2.13.5
+pydantic-settings==2.15.0
 
 # Prometheus instrumentation
 # prometheus-client is the reference implementation — no dependencies, stable API.
-prometheus-client==0.20.0
-
-# ASGI utilities
-python-multipart==0.0.9
+prometheus-client==0.26.0
