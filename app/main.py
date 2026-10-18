@@ -195,10 +195,11 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
-    # Disable the automatic /docs redirect — reduces attack surface in production.
-    # Re-enable for local development by removing this line.
-    # docs_url=None,
-    # redoc_url=None,
+    # openapi_url is disabled together with the UIs; otherwise the schema
+    # would remain reachable at /openapi.json with the docs pages turned off.
+    docs_url="/docs" if settings.enable_docs else None,
+    redoc_url="/redoc" if settings.enable_docs else None,
+    openapi_url="/openapi.json" if settings.enable_docs else None,
 )
 
 

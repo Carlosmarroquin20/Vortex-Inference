@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # value out of reprs and log lines if the settings object is ever printed.
     api_key: SecretStr | None = None
 
+    # Interactive docs (/docs, /redoc) and the OpenAPI schema are off by
+    # default: they publish the full request surface and validation limits to
+    # anyone who can reach the service. Enable explicitly for local work.
+    enable_docs: bool = False
+
     @field_validator("api_key", mode="before")
     @classmethod
     def blank_api_key_disables_auth(cls, v: object) -> object:

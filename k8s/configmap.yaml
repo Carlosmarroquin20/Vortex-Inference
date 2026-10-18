@@ -47,3 +47,8 @@ data:
   # clientIP.timeoutSeconds (default 10800s) and the upstream client's
   # read timeout. 120s covers Phi-3-mini at 2048 max_tokens on 2 CPU threads.
   VORTEX_INFERENCE_TIMEOUT_SECONDS: "120.0"
+
+  # Interactive API docs and the OpenAPI schema are not exposed in the
+  # cluster. Set explicitly so the effective value is visible in review
+  # rather than relying on the application default.
+  VORTEX_ENABLE_DOCS: "false"
