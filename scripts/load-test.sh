@@ -135,7 +135,10 @@ send_request() {
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "{\"prompt\": \"${prompt}\", \"max_tokens\": ${MAX_TOKENS}, \"temperature\": 0.7}" \
-        2>/dev/null || echo "000")
+        2>/dev/null || true)
+    # curl already writes 000 via -w on connection errors and timeouts;
+    # appending a fallback would produce "000000".
+    http_code=${http_code:-000}
 
     local end_time
     end_time=$(date +%s%N)
@@ -151,12 +154,16 @@ try:
 except:
     print('N/A')
 " 2>/dev/null || echo "N/A")
-        echo -e "  ${GREEN}[req-${request_id}]${NC} OK | ${duration_ms}ms | ${tps} tok/s"
+        echo -e "  ${GREEN}[req-${request_id}]${NC} OK | ${duration_ms}ms | ${tps} tok/s" >&2
     else
-        echo -e "  ${RED}[req-${request_id}]${NC} HTTP ${http_code} | ${duration_ms}ms"
+        echo -e "  ${RED}[req-${request_id}]${NC} HTTP ${http_code} | ${duration_ms}ms" >&2
     fi
 
     rm -f "/tmp/vortex_response_${request_id}.json"
+
+    # stdout carries only the status code because callers capture it with
+    # $(...) for the tally. Progress lines go to stderr so they reach the
+    # terminal instead of being recorded as extra (non-200) results.
     echo "${http_code}"
 }
 
