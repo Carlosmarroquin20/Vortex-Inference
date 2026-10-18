@@ -266,9 +266,11 @@ class CompletionResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    # Reports the logical model name only. The on-disk path is an internal
+    # deployment detail and this endpoint is unauthenticated by design.
     status: str
     model_loaded: bool
-    model_path: str
+    model: str
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +296,7 @@ async def health_check() -> HealthResponse:
     return HealthResponse(
         status="healthy",
         model_loaded=True,
-        model_path=settings.model_path,
+        model=settings.model_name,
     )
 
 
@@ -451,8 +453,13 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
 
     except Exception as exc:
         INFERENCE_REQUESTS_TOTAL.labels(status="error").inc()
-        logger.error(f"Inference failed. error={exc}")
-        raise HTTPException(status_code=500, detail=f"Inference error: {exc}")
+        # Full traceback goes to the server log only. Exception messages from
+        # llama.cpp and the OS routinely include file paths and allocator
+        # state, which should not be returned to API clients.
+        logger.exception("Inference failed.")
+        raise HTTPException(
+            status_code=500, detail="Inference failed due to an internal error."
+        ) from exc
 
     finally:
         # On the timeout path, _drain_and_release() owns the semaphore release
