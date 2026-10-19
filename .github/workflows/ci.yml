@@ -43,7 +43,39 @@ jobs:
         run: ruff format . --check
 
   # ---------------------------------------------------------------------------
-  # Job 2: Docker build
+  # Job 2: Unit and integration tests
+  # Runs the pytest suite against an in-process fake of llama_cpp, so no model
+  # weights or native build are needed. Coverage below the floor configured
+  # in pyproject.toml fails the job.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        # llama-cpp-python is excluded: tests/conftest.py replaces it with a
+        # fake, and building it from source would add ~5 minutes for code the
+        # suite never executes. The image build job covers the native library.
+        run: |
+          grep -v '^llama-cpp-python' requirements.txt > "${RUNNER_TEMP}/requirements-test.txt"
+          pip install -r "${RUNNER_TEMP}/requirements-test.txt" -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest --cov --cov-report=term-missing
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Docker build
   # Validates the multi-stage Dockerfile compiles successfully.
   # llama-cpp-python compilation (~5–8 min) is the most common failure point
   # when system library versions or CMake flags change.
@@ -71,7 +103,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------
-  # Job 3: Kubernetes manifest validation
+  # Job 4: Kubernetes manifest validation
   # Validates YAML structure and Kubernetes API schema without a live cluster.
   # kubeconform checks manifests against the published OpenAPI JSON schemas,
   # catching field typos, missing required fields, and API version mismatches

@@ -204,11 +204,12 @@ vortex-inference/
 ├── app/
 │   ├── main.py               # FastAPI server — lifecycle, endpoints, Prometheus metrics
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
+│   ├── logging_config.py     # logfmt formatter + request ID middleware
 │   └── models/
 │       └── llm_loader.py     # llama-cpp-python adapter — isolated from HTTP layer
+├── tests/                    # pytest suite against an in-process llama_cpp fake
 ├── docker/
-│   ├── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
-│   └── .dockerignore
+│   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
 ├── k8s/
 │   ├── namespace.yaml        # Namespace + ResourceQuota + LimitRange
 │   ├── configmap.yaml        # Runtime configuration (non-sensitive)
@@ -222,7 +223,24 @@ vortex-inference/
 ├── scripts/
 │   ├── setup-minikube.sh     # Cluster bootstrap: Minikube + KEDA + kube-prometheus-stack
 │   └── download-model.sh     # Phi-3-mini GGUF download with integrity verification
-├── requirements.txt
+├── requirements.txt          # Runtime dependencies (baked into the image)
+├── requirements-dev.txt      # Test and lint tooling
+├── pyproject.toml            # ruff, pytest and coverage configuration
+├── .dockerignore             # Must live at the build context root
 ├── .env.example
 └── README.md
+```
+
+---
+
+## Running Tests
+
+The suite replaces `llama_cpp` with an in-process fake, so it needs neither the
+native library nor model weights and runs in a few seconds:
+
+```bash
+grep -v '^llama-cpp-python' requirements.txt > /tmp/requirements-test.txt
+pip install -r /tmp/requirements-test.txt -r requirements-dev.txt
+pytest --cov
+ruff check . && ruff format . --check
 ```
