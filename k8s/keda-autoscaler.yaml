@@ -46,23 +46,24 @@ spec:
   # cost/latency SLOs, not hardware limits.
   maxReplicaCount: 3
 
-  # pollingInterval: how frequently KEDA queries the Prometheus metric (seconds).
-  # 15s provides fast reaction to demand spikes without overwhelming Prometheus
-  # with high-frequency queries. For tighter SLOs, reduce to 10s.
-  pollingInterval: 15
-
-  # cooldownPeriod: seconds KEDA waits before scaling IN (reducing replicas)
-  # after the metric drops below threshold.
+  # pollingInterval and cooldownPeriod are intentionally not set. With
+  # minReplicaCount >= 1, KEDA only activates and deactivates scaling at the
+  # 0 <-> 1 boundary, which this workload never crosses; scaling between 1
+  # and maxReplicaCount is performed by the HPA that KEDA creates. That HPA
+  # reads the metric on its own sync period (15s by default) and its scale-in
+  # protection is horizontalPodAutoscalerConfig.behavior.scaleDown below.
+  # KEDA 2.21 warns when either field is set in this configuration.
   #
-  # 300s (5 minutes) is intentionally aggressive for LLM workloads because:
+  # Scale-in is deliberately slow for LLM workloads:
   #   1. Model loading has a 60–90s startup cost — rapid scale-in/out cycles
   #      ("flapping") waste resources and degrade availability.
   #   2. Inference traffic is often bursty with short lulls between bursts.
-  #      A short cooldown would scale in during the lull and then immediately
-  #      scale out for the next burst, creating a sawtooth pattern.
+  #      Scaling in during a lull and immediately back out for the next burst
+  #      creates a sawtooth pattern.
   #   3. Scale-out is gated by the startup probe (up to 300s) — asymmetric
   #      timing means scale-out is slow; we compensate by making scale-in slow too.
-  cooldownPeriod: 300
+  # Verified on minikube: after load stopped, the HPA held 3 replicas for the
+  # 5-minute window, then removed one pod per minute down to 1.
 
   # advanced.restoreToOriginalReplicaCount: false keeps replicas at the KEDA-
   # managed minimum when the ScaledObject is deleted, rather than reverting to
@@ -83,8 +84,8 @@ spec:
             periodSeconds: 30
         scaleDown:
           # scaleDown.stabilizationWindowSeconds=300: use the maximum metric value
-          # over the past 5 minutes before deciding to scale in. This window must
-          # equal cooldownPeriod to produce consistent behavior.
+          # over the past 5 minutes before deciding to scale in. This is the
+          # setting that prevents flapping between 1 and maxReplicaCount.
           stabilizationWindowSeconds: 300
           policies:
           - type: Pods

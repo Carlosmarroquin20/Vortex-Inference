@@ -71,9 +71,11 @@ With `threshold: 3`, a queue of 7 concurrent requests produces `ceil(7/3) = 3 re
 
 `llama-cpp-python`'s C++ backend processes tokens sequentially within a single thread pool. Two simultaneous inference calls do not double throughput — they double memory pressure and cause CFS CPU throttling that degrades both requests. Horizontal scaling (KEDA) is the correct mechanism for concurrency. Vertical parallelism is reserved for GPU deployments with tensor parallelism support.
 
-### Why `cooldownPeriod: 300s`?
+### Why a 300s scale-down stabilization window?
 
-Model loading takes 60–90s from pod creation to readiness probe passing. A short cooldown period causes scale-in/scale-out flapping: the scaler removes a pod during a brief lull, then must re-provision it when the next burst arrives — paying the full startup cost again. Five minutes of stabilization eliminates this pattern at the cost of slightly higher idle resource usage.
+Model loading takes 60–90s from pod creation to readiness probe passing. Scaling in too eagerly causes flapping: a pod is removed during a brief lull, then must be re-provisioned when the next burst arrives — paying the full startup cost again. The HPA that KEDA manages keeps the highest replica count recommended over the last five minutes (`scaleDown.stabilizationWindowSeconds: 300`) and then removes at most one pod per minute, at the cost of slightly higher idle resource usage.
+
+KEDA's own `cooldownPeriod` is not used: with `minReplicaCount: 1` it only governs scaling to and from zero, which this workload never does.
 
 ### Memory limit: 4Gi hard ceiling
 
