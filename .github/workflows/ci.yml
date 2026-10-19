@@ -30,18 +30,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install ruff
-        run: pip install ruff==0.4.4
+        # The version is read from requirements-dev.txt so local runs and CI
+        # cannot drift apart; rule selection lives in pyproject.toml.
+        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
 
       - name: Run ruff check
-        # E and W: pycodestyle errors/warnings
-        # F: pyflakes (undefined names, unused imports)
-        # I: isort (import ordering)
-        run: ruff check app/ --select E,W,F,I --output-format=github
+        run: ruff check . --output-format=github
 
       - name: Run ruff format check
         # Fails if any file would be reformatted — enforces consistent style
         # without auto-applying changes in CI (that belongs in pre-commit).
-        run: ruff format app/ --check
+        run: ruff format . --check
 
   # ---------------------------------------------------------------------------
   # Job 2: Docker build

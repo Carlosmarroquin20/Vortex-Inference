@@ -1,0 +1,20 @@
+# Development and CI dependencies. Install alongside the runtime requirements:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# The test suite replaces llama_cpp with an in-process fake, so CI installs the
+# runtime requirements without llama-cpp-python and skips its ~5 minute native
+# build (see the test job in .github/workflows/ci.yml).
+
+pytest==9.1.1
+pytest-cov==7.1.0
+
+# HTTP client backing starlette.testclient. Starlette 1.x prefers httpx2 and
+# emits a deprecation warning when it falls back to the legacy httpx package.
+httpx2==2.13.1
+
+# Used only for its response models: the suite validates /v1/completions
+# output against openai.types.Completion to guard the drop-in compatibility
+# claim. Pinned to a release whose schema was verified against the server.
+openai==3.24.0
+
+ruff==0.4.4

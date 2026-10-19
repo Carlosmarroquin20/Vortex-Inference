@@ -1,0 +1,33 @@
+# Tool configuration only. The project is deployed as a container image built
+# from requirements.txt, not distributed as a package, so there is no
+# [project] table or build backend here.
+
+[tool.ruff]
+target-version = "py311"  # matches the python:3.11-slim runtime image
+line-length = 88
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort. Kept in sync with what CI enforces
+# so `ruff check` locally gives the same verdict as the pipeline.
+select = ["E", "W", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+# Promote warnings raised by our own code to errors so deprecations surface
+# in CI rather than in production logs. Third-party warnings stay visible
+# but do not fail the run.
+filterwarnings = [
+    "error:::app",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
