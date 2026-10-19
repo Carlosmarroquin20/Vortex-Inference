@@ -31,3 +31,6 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+# Set a few points below the current figure (~95%) so routine changes do not
+# fail CI, while a change that lands untested request-path code does.
+fail_under = 90
