@@ -15,9 +15,9 @@ httpx2==2.13.1
 # Used only for its response models: the suite validates /v1/completions
 # output against openai.types.Completion to guard the drop-in compatibility
 # claim. Pinned to a release whose schema was verified against the server.
-openai==3.24.0
+openai==3.29.0
 
-ruff==0.16.10
+ruff==0.17.0
 
 # Dependency vulnerability audit, run in CI and on the weekly schedule.
 pip-audit==2.10.1
