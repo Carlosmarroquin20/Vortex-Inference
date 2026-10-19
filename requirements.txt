@@ -2,7 +2,7 @@
 # llama-cpp-python provides Python bindings to llama.cpp's C++ inference engine.
 # Version pinned to ensure reproducible builds — llama.cpp undergoes frequent
 # breaking API changes between minor versions due to active GGUF format evolution.
-llama-cpp-python==0.2.90
+llama-cpp-python==0.3.36
 
 # HTTP framework
 # FastAPI is chosen over Flask for native async support — critical for serving

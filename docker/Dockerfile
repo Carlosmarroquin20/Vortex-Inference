@@ -106,14 +106,27 @@ RUN pip install --no-cache-dir /dist/*.whl \
     && rm -rf /dist \
     && pip uninstall --yes setuptools wheel
 
-# Build-time guard: load the native library and fail the build if the BLAS
-# backend is not compiled in, or if a shared library the wheel depends on is
+# Build-time guard: load the native libraries and fail the build if the BLAS
+# backend is not registered, or if a shared library the wheel depends on is
 # missing from this slimmer runtime image. Both would otherwise surface only
 # when the pod starts in the cluster.
-RUN python -c "import sys, llama_cpp; \
-info = llama_cpp.llama_print_system_info().decode(); \
-print(info); \
-sys.exit(0 if 'BLAS = 1' in info else 'llama.cpp was built without BLAS support')"
+#
+# The check queries ggml's backend registry directly instead of parsing
+# llama_print_system_info(). Since llama-cpp-python 0.3, ggml backends are
+# separate libraries, and the system info string only lists backends that
+# export a feature table; the BLAS backend does not, so it is absent from
+# that output even when compiled in and active.
+RUN python -c "import ctypes, os, sys, llama_cpp; \
+ggml = ctypes.CDLL(os.path.join(os.path.dirname(llama_cpp.__file__), 'lib', 'libggml.so')); \
+ggml.ggml_backend_reg_count.restype = ctypes.c_size_t; \
+ggml.ggml_backend_reg_get.argtypes = [ctypes.c_size_t]; \
+ggml.ggml_backend_reg_get.restype = ctypes.c_void_p; \
+ggml.ggml_backend_reg_name.argtypes = [ctypes.c_void_p]; \
+ggml.ggml_backend_reg_name.restype = ctypes.c_char_p; \
+names = [ggml.ggml_backend_reg_name(ggml.ggml_backend_reg_get(i)).decode() for i in range(ggml.ggml_backend_reg_count())]; \
+print('ggml backends:', names); \
+print(llama_cpp.llama_print_system_info().decode()); \
+sys.exit(0 if 'BLAS' in names else 'llama.cpp was built without the BLAS backend')"
 
 COPY app/ ./app/
 
