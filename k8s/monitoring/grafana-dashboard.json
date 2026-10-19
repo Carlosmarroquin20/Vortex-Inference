@@ -116,7 +116,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum(rate(vortex_inference_duration_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(vortex_inference_duration_seconds_bucket{status=~\"success|timeout\", namespace=\"$namespace\"}[5m])) by (le))",
           "legendFormat": "P95",
           "refId": "A"
         }
@@ -317,19 +317,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.50, sum(rate(vortex_inference_duration_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(vortex_inference_duration_seconds_bucket{status=~\"success|timeout\", namespace=\"$namespace\"}[5m])) by (le))",
           "legendFormat": "P50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum(rate(vortex_inference_duration_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(vortex_inference_duration_seconds_bucket{status=~\"success|timeout\", namespace=\"$namespace\"}[5m])) by (le))",
           "legendFormat": "P95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.99, sum(rate(vortex_inference_duration_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(vortex_inference_duration_seconds_bucket{status=~\"success|timeout\", namespace=\"$namespace\"}[5m])) by (le))",
           "legendFormat": "P99",
           "refId": "C"
         }

@@ -99,10 +99,6 @@ spec:
       # Verify with: kubectl get svc -n monitoring | grep prometheus
       serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
 
-      # metricName is used as the HPA metric name — must be unique across all
-      # ScaledObjects querying the same Prometheus instance to avoid HPA conflicts.
-      metricName: vortex_inference_active_requests_total
-
       # query returns the total active requests across all pods in the namespace.
       # Aggregating with sum() ensures KEDA accounts for the collective load
       # rather than scaling based on a single pod's metric (which would be

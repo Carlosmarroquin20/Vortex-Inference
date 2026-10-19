@@ -69,16 +69,28 @@ settings = Settings()
 INFERENCE_REQUESTS_TOTAL = Counter(
     "vortex_inference_requests_total",
     "Total inference requests, partitioned by terminal status.",
-    ["status"],  # "success" | "error" | "timeout"
+    ["status"],  # "success" | "error" | "timeout" | "cancelled" | "rejected"
 )
 
 INFERENCE_DURATION_SECONDS = Histogram(
     "vortex_inference_duration_seconds",
-    "End-to-end latency from request receipt to final token delivery. "
-    "Buckets are calibrated for interactive LLM workloads, not batch jobs — "
-    "the sub-100ms range is intentionally sparse because CPU inference cannot "
-    "achieve it; resolution there would waste cardinality.",
+    "Time spent in the inference engine, from acquiring the inference permit "
+    "until the request finished, partitioned by terminal status. Queue wait "
+    "is excluded (see vortex_inference_queue_wait_seconds). Timeouts are "
+    "recorded too: omitting them would hide the slowest requests from the "
+    "latency SLO exactly when it is being breached. Buckets are calibrated "
+    "for interactive LLM workloads; the sub-100ms range is intentionally "
+    "sparse because CPU inference cannot achieve it.",
+    ["status"],  # same values as vortex_inference_requests_total
     buckets=[0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
+)
+
+QUEUE_WAIT_SECONDS = Histogram(
+    "vortex_inference_queue_wait_seconds",
+    "Time a request waited for the inference permit before starting. "
+    "Sustained growth here with flat inference duration means the pod is "
+    "saturated and KEDA should be adding replicas.",
+    buckets=[0.01, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
 )
 
 TOKENS_GENERATED_TOTAL = Counter(
@@ -449,14 +461,22 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     _semaphore_acquired = False
     _drain_pending = False
 
+    # Set once the permit is held and on every terminal path respectively;
+    # the finally block records latency from them so each outcome is
+    # observed exactly once.
+    request_start: float | None = None
+    outcome: str | None = None
+
     try:
+        enqueued_at = time.monotonic()
         await _inference_semaphore.acquire()
         _semaphore_acquired = True
 
         # request_start is measured after acquiring the semaphore so that
-        # INFERENCE_DURATION_SECONDS reflects pure inference time, not queue
-        # wait. Queue depth is already observable via INFERENCE_ACTIVE_REQUESTS.
+        # INFERENCE_DURATION_SECONDS reflects pure inference time; queue wait
+        # is recorded separately.
         request_start = time.monotonic()
+        QUEUE_WAIT_SECONDS.observe(request_start - enqueued_at)
 
         stop_event = threading.Event()
         loop = asyncio.get_running_loop()
@@ -503,6 +523,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             _drain_pending = True
 
             if isinstance(exc, asyncio.CancelledError):
+                outcome = "cancelled"
                 INFERENCE_REQUESTS_TOTAL.labels(status="cancelled").inc()
                 logger.warning(
                     "Inference cancelled before completion. Worker thread "
@@ -510,6 +531,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
                 )
                 raise
 
+            outcome = "timeout"
             INFERENCE_REQUESTS_TOTAL.labels(status="timeout").inc()
             logger.error(
                 "Inference exceeded its deadline. Worker thread signalled to stop.",
@@ -530,8 +552,8 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         duration = time.monotonic() - request_start
         tps = result["tokens_completion"] / duration if duration > 0 else 0.0
 
+        outcome = "success"
         INFERENCE_REQUESTS_TOTAL.labels(status="success").inc()
-        INFERENCE_DURATION_SECONDS.observe(duration)
         TOKENS_GENERATED_TOTAL.labels(type="prompt").inc(result["tokens_prompt"])
         TOKENS_GENERATED_TOTAL.labels(type="completion").inc(
             result["tokens_completion"]
@@ -565,6 +587,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     except PromptTooLongError as exc:
         # A client error, not a service failure: counted separately so it does
         # not inflate the error-ratio SLO.
+        outcome = "rejected"
         INFERENCE_REQUESTS_TOTAL.labels(status="rejected").inc()
         logger.info(
             "Prompt rejected: exceeds context window.",
@@ -573,6 +596,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except Exception as exc:
+        outcome = "error"
         INFERENCE_REQUESTS_TOTAL.labels(status="error").inc()
         # Full traceback goes to the server log only. Exception messages from
         # llama.cpp and the OS routinely include file paths and allocator
@@ -583,6 +607,11 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         ) from exc
 
     finally:
+        if request_start is not None and outcome is not None:
+            INFERENCE_DURATION_SECONDS.labels(status=outcome).observe(
+                time.monotonic() - request_start
+            )
+
         # On the timeout and cancellation paths, _drain_and_release() owns the
         # semaphore release and gauge decrement once the thread exits. All
         # other paths (success, error, cancellation while still queued) are

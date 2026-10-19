@@ -51,13 +51,16 @@ spec:
   - name: vortex.inference.slo.latency
     rules:
     # SLO: 95% of requests complete in under 10 seconds.
+    # The latency SLO covers requests that ran to completion or hit the
+    # deadline. Rejected prompts and cancellations end in milliseconds and
+    # would drag the quantile down, masking real degradation.
     # P95 is the primary customer-facing SLO. P99 is tracked separately
     # for capacity planning — chasing P99 in CPU-bound inference is often
     # not cost-effective; the tail is dominated by long prompts, not instability.
     - alert: VortexInferenceHighP95Latency
       expr: >
         histogram_quantile(0.95,
-          sum(rate(vortex_inference_duration_seconds_bucket[5m])) by (le)
+          sum(rate(vortex_inference_duration_seconds_bucket{status=~"success|timeout"}[5m])) by (le)
         ) > 10
       for: 5m
       labels:
@@ -79,7 +82,7 @@ spec:
     - alert: VortexInferenceCriticalP99Latency
       expr: >
         histogram_quantile(0.99,
-          sum(rate(vortex_inference_duration_seconds_bucket[5m])) by (le)
+          sum(rate(vortex_inference_duration_seconds_bucket{status=~"success|timeout"}[5m])) by (le)
         ) > 30
       for: 3m
       labels:

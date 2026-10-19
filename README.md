@@ -154,8 +154,11 @@ kubectl top pods -n vortex-inference
 # Tokens per second (5m rate)
 rate(vortex_inference_tokens_generated_total{type="completion"}[5m])
 
-# P95 inference latency
-histogram_quantile(0.95, sum(rate(vortex_inference_duration_seconds_bucket[5m])) by (le))
+# P95 inference latency (completed and timed-out requests)
+histogram_quantile(0.95, sum(rate(vortex_inference_duration_seconds_bucket{status=~"success|timeout"}[5m])) by (le))
+
+# P95 queue wait before inference starts
+histogram_quantile(0.95, sum(rate(vortex_inference_queue_wait_seconds_bucket[5m])) by (le))
 
 # Active request queue depth (KEDA scaling signal)
 sum(vortex_inference_active_requests{namespace="vortex-inference"})
