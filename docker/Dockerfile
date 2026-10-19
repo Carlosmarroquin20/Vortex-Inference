@@ -101,10 +101,18 @@ WORKDIR /app
 # them at runtime. They are removed rather than upgraded: setuptools vendors
 # its own copies of wheel and jaraco.context, which image scanners report as
 # fixable HIGH CVEs, and code that is not present cannot be exploited.
+#
+# llama-cpp-python 0.3 wheels also install a second copy of every native
+# library, plus CMake and pkg-config development files, into a top-level
+# site-packages/lib directory. The package only loads from llama_cpp/lib
+# (none of those libraries link against the extra copy), so the duplicate
+# is dropped to keep ~37MB of unused shared objects out of the image.
 COPY --from=builder /dist /dist
 RUN pip install --no-cache-dir /dist/*.whl \
     && rm -rf /dist \
-    && pip uninstall --yes setuptools wheel
+    && pip uninstall --yes setuptools wheel \
+    && site_packages="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && rm -rf "${site_packages:?}/lib"
 
 # Build-time guard: load the native libraries and fail the build if the BLAS
 # backend is not registered, or if a shared library the wheel depends on is
