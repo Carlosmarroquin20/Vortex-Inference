@@ -29,9 +29,20 @@ COPY requirements.txt .
 # names, producing a working but BLAS-less binary. The runtime stage asserts
 # that BLAS was actually linked so this cannot regress unnoticed.
 #
+# CPU portability: llama.cpp defaults to GGML_NATIVE=ON, i.e. -march=native,
+# which compiles for whatever CPU happens to run the build. An image built on
+# a CI runner with AVX-512 would then die with SIGILL on a node without it,
+# and only on that node. GGML_NATIVE=OFF with an explicit instruction set
+# pins the x86-64-v3 baseline (AVX2/FMA/F16C, Intel Haswell / AMD Zen and
+# newer), which every current cloud and desktop x86 CPU supports. AVX-512 is
+# left off on purpose: its speedup for quantized matmul is modest and it is
+# absent on many consumer and some cloud CPUs.
+#
 # GPU transition path: replace with CMAKE_ARGS="-DGGML_CUDA=on", switch to a
 # CUDA base image, and add --gpus flags to offload layers to VRAM.
-ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS \
+-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
+-DGGML_AVX512=OFF"
 ENV FORCE_CMAKE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
