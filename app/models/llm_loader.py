@@ -19,6 +19,18 @@ from app.config import Settings
 logger = logging.getLogger("vortex.llm_loader")
 
 
+class PromptTooLongError(ValueError):
+    """The prompt alone does not fit in the model's context window."""
+
+    def __init__(self, prompt_tokens: int, n_ctx: int) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.n_ctx = n_ctx
+        super().__init__(
+            f"Prompt is {prompt_tokens} tokens; the context window is {n_ctx} "
+            "tokens and must also leave room for the completion."
+        )
+
+
 class LLMLoader:
     """
     Stateful wrapper around a llama.cpp model instance.
@@ -35,6 +47,7 @@ class LLMLoader:
         # for liveness; a single attribute store/load is atomic in CPython,
         # so no lock is needed for this advisory value.
         self._busy_since: float | None = None
+        self._n_ctx = settings.n_ctx
 
         logger.info(
             "Loading GGUF model from disk.",
@@ -93,6 +106,14 @@ class LLMLoader:
         boundary. This lets the thread exit cleanly so the semaphore in main.py
         can be released without racing against an in-progress C++ call.
         """
+        # Checked explicitly so the API can answer 400 with a precise message.
+        # llama-cpp-python raises a bare ValueError for this case, which is
+        # indistinguishable from internal failures. Tokenizing an extra time
+        # is negligible next to generation.
+        prompt_tokens = len(self._model.tokenize(prompt.encode("utf-8")))
+        if prompt_tokens >= self._n_ctx:
+            raise PromptTooLongError(prompt_tokens, self._n_ctx)
+
         stopping_criteria = None
         if stop_event is not None:
 

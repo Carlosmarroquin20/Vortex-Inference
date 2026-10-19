@@ -27,7 +27,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Annotated, AsyncGenerator
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -39,12 +39,12 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from starlette.responses import Response
 
 from app.config import Settings
 from app.logging_config import RequestContextMiddleware, configure_logging
-from app.models.llm_loader import LLMLoader
+from app.models.llm_loader import LLMLoader, PromptTooLongError
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -301,7 +301,12 @@ class CompletionRequest(BaseModel):
     max_tokens: int = Field(default=256, ge=1, le=2048)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    stop: list[str] | None = Field(default=None, max_length=4)
+    # Each stop sequence is matched against the generated text after every
+    # token, so both count and length are bounded. Empty strings are rejected:
+    # they match immediately and would end generation before the first token.
+    stop: (
+        list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
+    ) = Field(default=None, max_length=4)
 
     model_config = {"extra": "forbid"}
     # extra="forbid" prevents prompt injection via undocumented parameters
@@ -556,6 +561,16 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
 
     except HTTPException:
         raise
+
+    except PromptTooLongError as exc:
+        # A client error, not a service failure: counted separately so it does
+        # not inflate the error-ratio SLO.
+        INFERENCE_REQUESTS_TOTAL.labels(status="rejected").inc()
+        logger.info(
+            "Prompt rejected: exceeds context window.",
+            extra={"tokens_prompt": exc.prompt_tokens, "n_ctx": exc.n_ctx},
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except Exception as exc:
         INFERENCE_REQUESTS_TOTAL.labels(status="error").inc()

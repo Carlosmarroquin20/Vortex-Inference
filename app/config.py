@@ -7,13 +7,18 @@ promoted across environments (dev → staging → prod) by changing only the
 ConfigMap or Secret — not the image layer. No hardcoded paths or magic numbers.
 """
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """
     Runtime configuration for the inference server.
+
+    Numeric fields carry range constraints so a malformed ConfigMap fails at
+    process start with a clear validation error. Without them, values such as
+    max_concurrent_requests=0 load successfully and only surface later as a
+    semaphore that never admits a request.
 
     Values are resolved in this priority order:
       1. Environment variables (injected by Kubernetes ConfigMap/Secret)
@@ -29,33 +34,33 @@ class Settings(BaseSettings):
     # model's actual training context (4096 for Phi-3-mini) wastes VRAM/RAM
     # without any quality benefit. In memory-constrained pods, this is the
     # first lever to pull if the process approaches its memory limit.
-    n_ctx: int = 4096
+    n_ctx: int = Field(default=4096, ge=1)
 
     # n_threads should match the pod's CPU request, not its limit.
     # Using the limit value risks throttling during burst inference, which
     # causes latency spikes that look like application bugs in dashboards.
     # The relationship: n_threads=2 → ~1.5–2 tok/s on modern x86 with OpenBLAS.
-    n_threads: int = 2
+    n_threads: int = Field(default=2, ge=1)
 
     # n_gpu_layers=0 enforces full CPU inference. In a GPU-enabled cluster,
     # set to -1 to offload all layers to VRAM and gain ~10x throughput.
     # This single flag is the only change needed to transition from CPU to GPU.
-    n_gpu_layers: int = 0
+    n_gpu_layers: int = Field(default=0, ge=-1)
 
     # max_concurrent_requests=1 is deliberate for single-pod CPU inference.
     # llama.cpp processes tokens sequentially in a single C++ thread pool.
     # Parallel requests don't increase throughput — they increase memory
     # pressure and produce degraded output for all in-flight requests.
     # KEDA handles concurrency by scaling horizontally, not vertically.
-    max_concurrent_requests: int = 1
+    max_concurrent_requests: int = Field(default=1, ge=1)
 
     # --- Server Configuration ---
-    port: int = 8080
+    port: int = Field(default=8080, ge=1, le=65535)
 
     # Inference timeout in seconds. Must be shorter than the Kubernetes
     # Service's session affinity timeout and the client's read timeout.
     # Tuned for worst-case Phi-3-mini on 2 CPU threads at 2048 max_tokens.
-    inference_timeout_seconds: float = 120.0
+    inference_timeout_seconds: float = Field(default=120.0, gt=0)
 
     # --- Security ---
     # Shared bearer token for /v1/completions. Authentication is enforced only
