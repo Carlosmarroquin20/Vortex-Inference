@@ -11,7 +11,7 @@
 # once already; with a digest, a base change only happens through a reviewed
 # commit (Dependabot proposes digest bumps, see .github/dependabot.yml).
 # Keep the two FROM lines identical so builder and runtime share a libc.
-FROM python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS builder
+FROM python:3.14-slim-trixie@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS builder
 
 # Build dependencies for llama-cpp-python's C++ compilation.
 # libopenblas-dev provides the BLAS backend used for matrix operations —
@@ -71,7 +71,7 @@ RUN pip wheel --no-cache-dir --wheel-dir=/dist -r requirements.txt
 # =============================================================================
 # Stage 2: Runtime
 # =============================================================================
-FROM python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS runtime
+FROM python:3.14-slim-trixie@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS runtime
 
 # PYTHONDONTWRITEBYTECODE: the root filesystem is read-only in the pod, so
 # bytecode writes would fail on every import anyway.
