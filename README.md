@@ -87,7 +87,7 @@ The 4Gi limit simulates a dense multi-tenant node or an edge deployment where ea
 - `minikube` ≥ 1.32
 - `kubectl` ≥ 1.28
 - `helm` ≥ 3.14
-- `huggingface-cli` (`pip install huggingface_hub`) — for verified model download
+- `curl` or `wget`, and `sha256sum` or `shasum` — the model download is verified against a pinned SHA-256
 - 12GB free RAM, 8 CPU cores, 20GB disk
 
 ---
@@ -230,7 +230,7 @@ vortex-inference/
 │       └── servicemonitor.yaml     # ServiceMonitor CRD — Prometheus scrape config
 ├── scripts/
 │   ├── setup-minikube.sh     # Cluster bootstrap: Minikube + KEDA + kube-prometheus-stack
-│   └── download-model.sh     # Phi-3-mini GGUF download with integrity verification
+│   └── download-model.sh     # Pinned-revision GGUF download, SHA-256 verified, resumable
 ├── requirements.txt          # Runtime dependencies (baked into the image)
 ├── requirements-dev.txt      # Test and lint tooling
 ├── pyproject.toml            # ruff, pytest and coverage configuration
