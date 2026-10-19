@@ -33,7 +33,10 @@ metadata:
   namespace: vortex-inference
   labels:
     app.kubernetes.io/name: vortex-inference
-    app.kubernetes.io/component: inference-server
+    # Deliberately distinct from the ClusterIP service's component label: the
+    # ServiceMonitor selects on it, and matching both services would scrape
+    # every pod twice (see k8s/monitoring/servicemonitor.yaml).
+    app.kubernetes.io/component: external-access
   annotations:
     # AWS NLB annotation (commented out — shown to demonstrate production pattern):
     # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"

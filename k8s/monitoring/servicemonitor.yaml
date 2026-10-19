@@ -25,12 +25,15 @@ metadata:
     # Default kube-prometheus-stack selector: release=kube-prometheus-stack
     release: kube-prometheus-stack
 spec:
+  # Selects only the ClusterIP service. Prometheus discovers one target per
+  # matching Service endpoint, so selecting on the app name alone also matched
+  # the LoadBalancer service and scraped every pod twice under two job labels.
+  # That doubled sum(vortex_inference_active_requests), the KEDA trigger query,
+  # making KEDA scale out at half the intended load.
   selector:
     matchLabels:
       app.kubernetes.io/name: vortex-inference
-
-  # Target only the ClusterIP service (not the LoadBalancer) for scraping.
-  # The LB service adds an extra hop and its IP changes with minikube tunnel restarts.
+      app.kubernetes.io/component: inference-server
   endpoints:
   - port: http
     path: /metrics
