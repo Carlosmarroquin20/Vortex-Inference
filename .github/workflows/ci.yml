@@ -41,10 +41,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -72,10 +72,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
           cache: pip
@@ -106,13 +106,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build image (no push)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
@@ -142,17 +142,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install kubeconform
+        # The archive is verified against the SHA-256 published in the
+        # release's CHECKSUMS file before anything is extracted onto PATH.
+        env:
+          KUBECONFORM_VERSION: v0.6.7
+          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
         run: |
-          curl -fsSL             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz             | sudo tar -xz -C /usr/local/bin kubeconform
+          archive="${RUNNER_TEMP}/kubeconform.tar.gz"
+          curl -fsSL -o "${archive}" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  ${archive}" | sha256sum --check --strict
+          sudo tar -xzf "${archive}" -C /usr/local/bin kubeconform
 
-      - name: Install yq (YAML validator)
-        run: |
-          wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
-          chmod +x /usr/local/bin/yq
+      # yq ships with the ubuntu-24.04 runner image, so it is not downloaded
+      # here; the pinned runner version keeps it stable.
 
       - name: Validate core manifests (kubeconform)
         # Fully offline with respect to the cluster: schemas are fetched from
@@ -161,7 +167,12 @@ jobs:
         # -strict rejects unknown and duplicated fields, which is where most
         # indentation and typo mistakes surface.
         run: |
-          kubeconform -strict -summary -kubernetes-version 1.30.0             k8s/namespace.yaml             k8s/configmap.yaml             k8s/model-pv.yaml             k8s/deployment.yaml             k8s/service.yaml
+          kubeconform -strict -summary -kubernetes-version 1.30.0 \
+            k8s/namespace.yaml \
+            k8s/configmap.yaml \
+            k8s/model-pv.yaml \
+            k8s/deployment.yaml \
+            k8s/service.yaml
 
       - name: Validate CRD-based manifests (YAML syntax via yq)
         # Resources using third-party API groups (keda.sh, monitoring.coreos.com)
