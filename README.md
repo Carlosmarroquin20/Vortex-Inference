@@ -154,7 +154,8 @@ print(completion.choices[0].text)
 # Prometheus UI
 kubectl port-forward svc/kube-prometheus-stack-prometheus 9090:9090 -n monitoring
 
-# Grafana (admin / vortex-admin)
+# Grafana (user admin; the password is generated at install time)
+make grafana-password
 kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
 
 # KEDA scaling activity

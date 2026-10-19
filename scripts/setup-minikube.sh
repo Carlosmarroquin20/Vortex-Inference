@@ -59,12 +59,15 @@ helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheu
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues=false \
   --set grafana.enabled=true \
-  --set grafana.adminPassword=vortex-admin \
   --wait --timeout=300s
 
+# No admin password is passed: the Grafana chart then generates a random one,
+# stores it in the kube-prometheus-stack-grafana Secret, and keeps it across
+# `helm upgrade`. A literal in this script would be the same well-known
+# credential on every cluster built from this repository.
 log_info "kube-prometheus-stack installed."
 log_warn "Grafana: kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n ${MONITORING_NAMESPACE}"
-log_warn "Grafana credentials: admin / vortex-admin"
+log_warn "Grafana credentials: user admin, password via 'make grafana-password'"
 
 # =============================================================================
 # 3. Install KEDA
