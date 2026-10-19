@@ -4,11 +4,24 @@
 # Separate build and runtime stages to prevent build-time dependencies
 # (cmake, gcc, headers) from inflating the final image size. The compiled
 # llama-cpp-python wheel is the only artifact transferred to the runtime stage.
-FROM python:3.11-slim AS builder
+#
+# Base image reproducibility: both stages pin the Debian release in the tag
+# (slim-trixie) and the exact multi-arch index by digest. The plain 3.11-slim
+# tag moves on every upstream rebuild and silently switched Debian releases
+# once already; with a digest, a base change only happens through a reviewed
+# commit (Dependabot proposes digest bumps, see .github/dependabot.yml).
+# Keep the two FROM lines identical so builder and runtime share a libc.
+FROM python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS builder
 
 # Build dependencies for llama-cpp-python's C++ compilation.
 # libopenblas-dev provides the BLAS backend used for matrix operations —
 # the primary compute path for transformer attention on CPU.
+#
+# apt packages are deliberately not version-pinned (DL3008). Debian removes
+# superseded versions from its mirrors when security updates land, so exact
+# pins break the build precisely when a patched package is available. The
+# digest-pinned base fixes the release; packages track its security updates.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -45,8 +58,10 @@ ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS \
 -DGGML_AVX512=OFF"
 ENV FORCE_CMAKE=1
 
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip wheel --no-cache-dir --wheel-dir=/dist -r requirements.txt
+# pip is not upgraded first: an unpinned `pip install --upgrade pip` made
+# the build depend on whatever pip release was current that day. The pip
+# shipped in the digest-pinned base image builds these wheels fine.
+RUN pip wheel --no-cache-dir --wheel-dir=/dist -r requirements.txt
 # Single pip wheel invocation covers all dependencies including llama-cpp-python.
 # CMAKE_ARGS and FORCE_CMAKE set above are inherited here, ensuring the C++
 # compilation uses OpenBLAS. Running llama-cpp-python as a separate step
@@ -56,12 +71,21 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # =============================================================================
 # Stage 2: Runtime
 # =============================================================================
-FROM python:3.11-slim AS runtime
+FROM python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS runtime
+
+# PYTHONDONTWRITEBYTECODE: the root filesystem is read-only in the pod, so
+# bytecode writes would fail on every import anyway.
+# PYTHONUNBUFFERED: log lines reach the container runtime as they are
+# written, so nothing is lost in a buffer when a pod is OOM-killed.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 # Only the shared libraries are needed at runtime — not the dev headers or
 # the compiler toolchain. libgomp1 is the OpenMP runtime: llama.cpp builds
 # with OpenMP threading by default, and the builder gets it implicitly from
 # build-essential, so its absence here only shows up when libllama.so loads.
+# Unpinned for the same reason as in the builder stage.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libopenblas0 \
@@ -98,7 +122,10 @@ RUN useradd --create-home --uid 1000 --shell /bin/sh vortex
 # Must run before USER: an unprivileged user cannot create directories in /.
 RUN mkdir -p /models && chown vortex:vortex /models
 
-USER vortex
+# Numeric UID:GID rather than the name: the kubelet can only verify
+# runAsNonRoot against a numeric user, and it matches runAsUser in the
+# Deployment without relying on /etc/passwd inside the image.
+USER 1000:1000
 
 EXPOSE 8080
 
