@@ -130,6 +130,22 @@ curl -X POST "http://${INFERENCE_IP}/v1/completions" \
   -d '{"prompt": "Explain transformer attention in one paragraph:", "max_tokens": 200}'
 ```
 
+The response follows OpenAI's `text_completion` schema, so the official SDKs work
+unchanged (streaming is not supported). Server-side throughput is reported in an
+additional `performance` object.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url=f"http://{INFERENCE_IP}/v1", api_key=API_KEY)
+completion = client.completions.create(
+    model="phi-3-mini-4k-instruct",
+    prompt="Explain transformer attention in one paragraph:",
+    max_tokens=200,
+)
+print(completion.choices[0].text)
+```
+
 ---
 
 ## Observability

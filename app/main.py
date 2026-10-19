@@ -26,8 +26,9 @@ import hmac
 import logging
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncGenerator
+from typing import Annotated, AsyncGenerator, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -43,7 +44,11 @@ from pydantic import BaseModel, Field, StringConstraints
 from starlette.responses import Response
 
 from app.config import Settings
-from app.logging_config import RequestContextMiddleware, configure_logging
+from app.logging_config import (
+    RequestContextMiddleware,
+    configure_logging,
+    request_id_var,
+)
 from app.models.llm_loader import LLMLoader, PromptTooLongError
 
 # ---------------------------------------------------------------------------
@@ -309,6 +314,9 @@ async def require_api_key(
 # Schemas
 # ---------------------------------------------------------------------------
 class CompletionRequest(BaseModel):
+    # Accepted because the OpenAI SDKs always send it. The server hosts a
+    # single model, so the value is not used for routing.
+    model: str | None = Field(default=None, max_length=256)
     prompt: str = Field(..., min_length=1, max_length=32768)
     max_tokens: int = Field(default=256, ge=1, le=2048)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
@@ -319,20 +327,48 @@ class CompletionRequest(BaseModel):
     stop: (
         list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
     ) = Field(default=None, max_length=4)
+    # Streaming is not implemented. Declared explicitly so stream=true fails
+    # with a field-level validation error rather than a generic
+    # "extra inputs are not permitted".
+    stream: Literal[False] = False
 
     model_config = {"extra": "forbid"}
     # extra="forbid" prevents prompt injection via undocumented parameters
     # that could be processed by future versions of the model loader.
 
 
-class CompletionResponse(BaseModel):
+class CompletionChoice(BaseModel):
+    index: int
     text: str
-    finish_reason: str  # "stop" = hit stop sequence; "length" = max_tokens reached
-    tokens_prompt: int
-    tokens_completion: int
+    logprobs: None = None
+    finish_reason: str | None  # "stop" = stop sequence/EOS; "length" = max_tokens
+
+
+class CompletionUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class CompletionPerformance(BaseModel):
     tokens_per_second: float
     duration_seconds: float
+
+
+class CompletionResponse(BaseModel):
+    """
+    Mirrors OpenAI's text_completion object so the official SDKs and other
+    OpenAI-compatible clients parse responses natively. `performance` is a
+    server-specific extension; those clients ignore unknown fields.
+    """
+
+    id: str
+    object: Literal["text_completion"] = "text_completion"
+    created: int
     model: str
+    choices: list[CompletionChoice]
+    usage: CompletionUsage
+    performance: CompletionPerformance
 
 
 class HealthResponse(BaseModel):
@@ -571,14 +607,28 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             },
         )
 
+        # Reusing the request ID makes a completion traceable to its log lines.
+        completion_id = request_id_var.get() or uuid.uuid4().hex
         return CompletionResponse(
-            text=result["text"],
-            finish_reason=result["finish_reason"],
-            tokens_prompt=result["tokens_prompt"],
-            tokens_completion=result["tokens_completion"],
-            tokens_per_second=tps,
-            duration_seconds=duration,
+            id=f"cmpl-{completion_id}",
+            created=int(time.time()),
             model=settings.model_name,
+            choices=[
+                CompletionChoice(
+                    index=0,
+                    text=result["text"],
+                    finish_reason=result["finish_reason"],
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=result["tokens_prompt"],
+                completion_tokens=result["tokens_completion"],
+                total_tokens=result["tokens_prompt"] + result["tokens_completion"],
+            ),
+            performance=CompletionPerformance(
+                tokens_per_second=round(tps, 3),
+                duration_seconds=round(duration, 3),
+            ),
         )
 
     except HTTPException:

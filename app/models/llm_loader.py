@@ -134,8 +134,11 @@ class LLMLoader:
         finally:
             self._busy_since = None
 
+        # The text is returned verbatim. Completion clients concatenate prompt
+        # and output, so trimming would drop meaningful leading whitespace
+        # (for example the space between the last prompt word and the next).
         return {
-            "text": output["choices"][0]["text"].strip(),
+            "text": output["choices"][0]["text"],
             "finish_reason": output["choices"][0]["finish_reason"],
             "tokens_prompt": output["usage"]["prompt_tokens"],
             "tokens_completion": output["usage"]["completion_tokens"],

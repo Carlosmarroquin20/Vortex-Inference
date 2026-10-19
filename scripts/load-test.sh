@@ -150,7 +150,7 @@ send_request() {
 import json, sys
 try:
     data = json.load(open('/tmp/vortex_response_${request_id}.json'))
-    print(f\"{data.get('tokens_per_second', 0):.1f}\")
+    print(f\"{data.get('performance', {}).get('tokens_per_second', 0):.1f}\")
 except:
     print('N/A')
 " 2>/dev/null || echo "N/A")
