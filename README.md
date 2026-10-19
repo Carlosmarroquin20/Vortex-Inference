@@ -215,6 +215,8 @@ vortex-inference/
 │   └── models/
 │       └── llm_loader.py     # llama-cpp-python adapter — isolated from HTTP layer
 ├── tests/                    # pytest suite against an in-process llama_cpp fake
+├── docs/
+│   └── runbooks.md           # One runbook per alert, linked via runbook_url
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
 ├── k8s/

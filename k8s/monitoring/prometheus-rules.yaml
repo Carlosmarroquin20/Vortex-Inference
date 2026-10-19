@@ -68,6 +68,7 @@ spec:
         team: mlops
         slo: latency
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencehighp95latency"
         summary: "Inference P95 latency exceeds 10s SLO threshold"
         description: >
           P95 inference latency is {{ $value | humanizeDuration }},
@@ -75,7 +76,6 @@ spec:
           current request volume, max_tokens set too high by clients, or
           node CPU throttling. Check KEDA ScaledObject status and active
           request queue depth.
-        runbook_url: "https://github.com/your-org/vortex-inference/wiki/runbooks/high-latency"
 
     # P99 > 30s indicates the tail distribution has degraded significantly.
     # At this point, timeout errors become likely and user-visible.
@@ -90,6 +90,7 @@ spec:
         team: mlops
         slo: latency
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencecriticalp99latency"
         summary: "Inference P99 latency exceeds 30s — timeout errors imminent"
         description: >
           P99 inference latency is {{ $value | humanizeDuration }}.
@@ -111,6 +112,7 @@ spec:
         team: mlops
         slo: availability
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencehigherrorrate"
         summary: "Inference error rate exceeds 1% SLO"
         description: >
           Error ratio is {{ $value | humanizePercentage }} over the last 5m.
@@ -125,6 +127,7 @@ spec:
         team: mlops
         slo: availability
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencecriticalerrorrate"
         summary: "Inference error rate exceeds 5% — service degraded"
         description: >
           Error ratio is {{ $value | humanizePercentage }}. The service is
@@ -149,6 +152,7 @@ spec:
         severity: critical
         team: mlops
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencenoreadypods"
         summary: "No ready inference pods — all traffic is being dropped"
         description: >
           The vortex-inference Deployment has 0 ready replicas for 2 minutes.
@@ -166,6 +170,7 @@ spec:
         severity: warning
         team: mlops
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencepersistentqueuepressure"
         summary: "High inference queue depth persisting for 10m — KEDA may be stalled"
         description: >
           Active request count is {{ $value }} and has not decreased in 10m.
@@ -194,6 +199,7 @@ spec:
         severity: warning
         team: mlops
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencepodhighmemoryusage"
         summary: "Inference pod memory usage above 90% of limit"
         description: >
           Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }}
@@ -216,6 +222,7 @@ spec:
         severity: warning
         team: mlops
       annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencefrequentrestarts"
         summary: "Inference pod restarting frequently — model loading may be failing"
         description: >
           Pod {{ $labels.pod }} has restarted {{ $value }} times in the last 15m.
