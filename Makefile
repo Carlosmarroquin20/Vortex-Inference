@@ -118,6 +118,7 @@ show-api-key:
 
 deploy: api-key
 	@printf "$(GREEN)[deploy]$(NC) Applying Kubernetes manifests to namespace $(NAMESPACE)...\n"
+	@kubectl apply -f k8s/networkpolicy.yaml
 	@kubectl apply -f k8s/configmap.yaml
 	@kubectl apply -f k8s/model-pv.yaml
 	@kubectl apply -f k8s/service.yaml

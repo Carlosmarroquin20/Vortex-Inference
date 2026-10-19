@@ -247,6 +247,7 @@ jobs:
         run: |
           kubeconform -strict -summary -kubernetes-version 1.30.0 \
             k8s/namespace.yaml \
+            k8s/networkpolicy.yaml \
             k8s/configmap.yaml \
             k8s/model-pv.yaml \
             k8s/deployment.yaml \

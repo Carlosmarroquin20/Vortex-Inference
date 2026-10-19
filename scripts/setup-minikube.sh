@@ -29,6 +29,8 @@ MONITORING_NAMESPACE="monitoring"
 # =============================================================================
 # 1. Start Minikube
 # =============================================================================
+# --cni=calico: minikube's default CNI does not enforce NetworkPolicy, which
+# would leave k8s/networkpolicy.yaml accepted by the API server but inert.
 log_info "Starting Minikube node (memory=${MINIKUBE_MEMORY}MB, cpus=${MINIKUBE_CPUS})"
 minikube start \
   --memory="${MINIKUBE_MEMORY}" \
@@ -36,6 +38,7 @@ minikube start \
   --disk-size="${MINIKUBE_DISK}" \
   --driver=docker \
   --kubernetes-version=stable \
+  --cni=calico \
   --addons=metrics-server
 
 log_info "Minikube started. Node status:"
@@ -93,6 +96,7 @@ log_warn "  minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models
 # =============================================================================
 log_info "Applying Kubernetes manifests..."
 kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/networkpolicy.yaml
 kubectl apply -f k8s/configmap.yaml
 
 # The Deployment requires this Secret to start. It is created only when

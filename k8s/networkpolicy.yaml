@@ -1,0 +1,64 @@
+---
+# Default deny for every pod in the namespace, in both directions.
+#
+# Network access is granted per workload by the policies below rather than
+# being open by default. A pod added to this namespace later (a debug shell,
+# a sidecar, a misconfigured job) gets no network access until a policy for
+# it is written and reviewed.
+#
+# Enforcement requires a CNI that implements NetworkPolicy. Minikube's default
+# CNI ignores these objects, so scripts/setup-minikube.sh starts the cluster
+# with --cni=calico. On a non-enforcing CNI the policies are accepted but have
+# no effect.
+#
+# Traffic from the node itself (kubelet probes, the API server pod proxy used
+# by `make metrics`) is always allowed by Kubernetes NetworkPolicy semantics
+# and needs no rule here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/part-of: vortex-inference
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+# Inference pods: ingress on the HTTP port only, no egress at all.
+#
+# Ingress is not restricted by source. The completions API is published
+# through a LoadBalancer, and with externalTrafficPolicy=Cluster kube-proxy
+# rewrites client source addresses, so a source-based rule could not tell
+# legitimate clients from anything else. Access control for the API is the
+# bearer token; this policy closes every other port. Prometheus scrapes the
+# same port from the monitoring namespace and is covered by this rule.
+#
+# Egress is denied entirely: the server reads weights from a local volume
+# and calls nothing over the network, not even DNS. A compromised process
+# therefore cannot reach other services or exfiltrate data. A future
+# component that needs egress (for example a model download init container)
+# must get its own, narrowly scoped policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vortex-inference-allow-http
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-inference
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - ports:
+    - port: http
+      protocol: TCP
+  egress: []
