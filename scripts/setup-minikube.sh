@@ -19,7 +19,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # --- Configuration ---
 MINIKUBE_MEMORY="10240"     # 10GB: leaves 2GB for the host OS during demos
-MINIKUBE_CPUS="6"
+MINIKUBE_CPUS="8"         # 3 replicas x 2 CPU requests + system and monitoring pods
 MINIKUBE_DISK="20g"
 KEDA_VERSION="2.14.0"
 PROMETHEUS_STACK_VERSION="58.4.0"

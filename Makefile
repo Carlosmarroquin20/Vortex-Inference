@@ -23,7 +23,7 @@ API_KEY_SECRET   := vortex-inference-api-key
 KEDA_VERSION     := 2.14.0
 PROM_STACK_VER   := 58.4.0
 MINIKUBE_MEMORY  := 10240
-MINIKUBE_CPUS    := 6
+MINIKUBE_CPUS    := 8
 
 # --- Color codes for output readability ---
 GREEN  := \033[0;32m

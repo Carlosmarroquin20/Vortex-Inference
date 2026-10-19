@@ -39,8 +39,9 @@ spec:
   # maxReplicaCount=3 is constrained by node capacity, not by the quota:
   #   memory: 3 × 2Gi requests = 6Gi on a 10Gi node (limits overcommit by
   #           design; pods are Burstable and peak only during model load)
-  #   cpu:    3 × 2 CPU requests = 6 CPU, the whole node at MINIKUBE_CPUS=6.
-  #           The third replica only schedules if system pods leave headroom.
+  #   cpu:    3 × 2 CPU requests = 6 CPU on an 8 CPU node (MINIKUBE_CPUS=8),
+  #           leaving ~2 CPU for the control plane, KEDA and the monitoring
+  #           stack. With 6 node CPUs the third replica would stay Pending.
   # In a production cluster with GPU nodes, this value would be driven by
   # cost/latency SLOs, not hardware limits.
   maxReplicaCount: 3

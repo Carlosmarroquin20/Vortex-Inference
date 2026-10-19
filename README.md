@@ -88,7 +88,7 @@ The 4Gi limit simulates a dense multi-tenant node or an edge deployment where ea
 - `kubectl` ≥ 1.28
 - `helm` ≥ 3.14
 - `huggingface-cli` (`pip install huggingface_hub`) — for verified model download
-- 12GB free RAM, 6 CPU cores, 20GB disk
+- 12GB free RAM, 8 CPU cores, 20GB disk
 
 ---
 
