@@ -20,6 +20,7 @@ NAMESPACE        := vortex-inference
 IMAGE_NAME       := vortex-inference
 IMAGE_TAG        := 1.0.0
 API_KEY_SECRET   := vortex-inference-api-key
+MONITORING_NAMESPACE := monitoring
 KEDA_VERSION     := 2.14.0
 PROM_STACK_VER   := 58.4.0
 MINIKUBE_MEMORY  := 10240
@@ -37,7 +38,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build api-key show-api-key deploy undeploy status logs metrics test load-test tunnel clean
+.PHONY: help setup model build api-key show-api-key dashboard deploy undeploy status logs metrics test load-test tunnel clean
 
 # =============================================================================
 # Default target — always show help first
@@ -53,6 +54,7 @@ help:
 	@printf "    make model       Download Phi-3-mini GGUF model (~2.4GB)\n"
 	@printf "    make build       Build Docker image inside Minikube daemon\n"
 	@printf "    make api-key     Create the API key Secret if it does not exist\n"
+	@printf "    make dashboard   Provision the Grafana dashboard via the sidecar\n"
 	@printf "    make deploy      Apply all Kubernetes manifests\n"
 	@echo ""
 	@printf "  $(GREEN)Operations$(NC)\n"
@@ -116,7 +118,20 @@ show-api-key:
 	@kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) \
 		-o jsonpath='{.data.api-key}' | base64 -d; echo
 
-deploy: api-key
+dashboard:
+	# kube-prometheus-stack's Grafana sidecar loads any ConfigMap labelled
+	# grafana_dashboard=1 in its namespace, so the dashboard appears without a
+	# manual import and stays in sync with the JSON in this repository.
+	# Rendered client-side and applied, so re-running updates it in place.
+	@printf "$(GREEN)[dashboard]$(NC) Provisioning Grafana dashboard in $(MONITORING_NAMESPACE)...\n"
+	@kubectl create configmap vortex-inference-dashboard \
+		-n $(MONITORING_NAMESPACE) \
+		--from-file=vortex-inference.json=k8s/monitoring/grafana-dashboard.json \
+		--dry-run=client -o yaml \
+		| kubectl label --local -f - grafana_dashboard=1 -o yaml \
+		| kubectl apply -f -
+
+deploy: api-key dashboard
 	@printf "$(GREEN)[deploy]$(NC) Applying Kubernetes manifests to namespace $(NAMESPACE)...\n"
 	@kubectl apply -f k8s/networkpolicy.yaml
 	@kubectl apply -f k8s/configmap.yaml

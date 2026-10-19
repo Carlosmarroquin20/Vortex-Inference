@@ -164,6 +164,12 @@ kubectl describe scaledobject vortex-inference-scaler -n vortex-inference
 kubectl top pods -n vortex-inference
 ```
 
+The **Vortex Inference** dashboard (`k8s/monitoring/grafana-dashboard.json`) is
+provisioned automatically by `make deploy` through the Grafana sidecar; run
+`make dashboard` to push changes to the JSON without redeploying. It can also be
+imported manually, in which case pick the Prometheus data source from the
+dashboard's *Data source* selector.
+
 **Key Prometheus queries for the Grafana dashboard:**
 
 ```promql
@@ -218,6 +224,7 @@ vortex-inference/
 │   ├── service.yaml          # ClusterIP + LoadBalancer services
 │   ├── keda-autoscaler.yaml  # ScaledObject with Prometheus trigger
 │   └── monitoring/
+│       ├── grafana-dashboard.json # Dashboard, provisioned via the Grafana sidecar
 │       ├── prometheus-rules.yaml   # PrometheusRule CRD — SLO alerts + recording rules
 │       └── servicemonitor.yaml     # ServiceMonitor CRD — Prometheus scrape config
 ├── scripts/
