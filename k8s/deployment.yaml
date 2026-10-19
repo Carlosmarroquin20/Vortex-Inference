@@ -170,7 +170,7 @@ spec:
         # failureThreshold * periodSeconds = 30 * 10 = 300s maximum startup budget.
         startupProbe:
           httpGet:
-            path: /health
+            path: /health/ready
             port: http
           initialDelaySeconds: 20
           periodSeconds: 10
@@ -178,25 +178,27 @@ spec:
           successThreshold: 1
           timeoutSeconds: 5
 
-        # readinessProbe: gates traffic routing. A failing readiness probe removes
-        # the pod from the Service's Endpoints slice — the correct behavior during
-        # model reloads or temporary resource exhaustion.
+        # readinessProbe: gates traffic routing. Fails until the model is loaded
+        # and while the inference worker is stalled past its deadline, removing
+        # the pod from the Service's Endpoints slice within 30s.
         readinessProbe:
           httpGet:
-            path: /health
+            path: /health/ready
             port: http
           periodSeconds: 10
           failureThreshold: 3   # 30s of failures before pod is marked NotReady
           successThreshold: 1
           timeoutSeconds: 5
 
-        # livenessProbe: triggers pod restart on deadlocks or zombie states.
-        # The period is intentionally longer than readiness — a temporarily
-        # slow pod should be taken out of rotation (readiness) before it is
-        # killed and restarted (liveness), minimizing disruption.
+        # livenessProbe: restarts the pod only for conditions a restart fixes:
+        # a blocked event loop (the probe times out) or a wedged llama.cpp
+        # thread holding the inference permit. It deliberately ignores load,
+        # since restarting a busy pod discards its queue and repays the model
+        # load cost. The longer window means readiness pulls a stalled pod out
+        # of rotation before liveness restarts it.
         livenessProbe:
           httpGet:
-            path: /health
+            path: /health/live
             port: http
           periodSeconds: 30
           failureThreshold: 3   # 90s of consecutive failures triggers restart

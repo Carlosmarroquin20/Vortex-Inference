@@ -10,6 +10,7 @@ applied to the ML inference layer.
 
 import logging
 import threading
+import time
 
 from llama_cpp import Llama
 
@@ -29,6 +30,11 @@ class LLMLoader:
 
     def __init__(self, settings: Settings) -> None:
         self._ready = False
+        # Monotonic timestamp of the call currently inside llama.cpp, or None
+        # when idle. Written by the worker thread and read by the event loop
+        # for liveness; a single attribute store/load is atomic in CPython,
+        # so no lock is needed for this advisory value.
+        self._busy_since: float | None = None
 
         logger.info(
             f"Loading GGUF model from disk. "
@@ -55,13 +61,18 @@ class LLMLoader:
 
     def is_ready(self) -> bool:
         """
-        Readiness check called by the /health endpoint.
+        True once the model has been loaded into memory.
 
-        Returns False if the model is uninitialized or if the internal Llama
-        object was garbage-collected — a scenario that indicates severe memory
-        pressure on the node (e.g., kubelet OOM eviction of adjacent containers).
+        The loader holds a strong reference to the Llama object for the life
+        of the process, so this cannot regress after startup; a lost model
+        means a dead process, which the kubelet detects on its own.
         """
-        return self._ready and self._model is not None
+        return self._ready
+
+    def busy_seconds(self) -> float:
+        """Seconds the current generate() call has spent in llama.cpp, or 0."""
+        started = self._busy_since
+        return time.monotonic() - started if started is not None else 0.0
 
     def generate(
         self,
@@ -91,15 +102,19 @@ class LLMLoader:
             def stopping_criteria(tokens: list[int], scores: list[float]) -> bool:
                 return stop_event.is_set()
 
-        output = self._model(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop or [],
-            echo=False,
-            stopping_criteria=stopping_criteria,
-        )
+        self._busy_since = time.monotonic()
+        try:
+            output = self._model(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop or [],
+                echo=False,
+                stopping_criteria=stopping_criteria,
+            )
+        finally:
+            self._busy_since = None
 
         return {
             "text": output["choices"][0]["text"].strip(),

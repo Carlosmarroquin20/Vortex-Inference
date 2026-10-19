@@ -321,25 +321,72 @@ class HealthResponse(BaseModel):
     model: str
 
 
+class LivenessResponse(BaseModel):
+    status: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@app.get("/health", response_model=HealthResponse, tags=["operations"])
-async def health_check() -> HealthResponse:
-    """
-    Kubernetes readiness and liveness probe target.
+# Margin past the inference deadline before a still-running worker thread is
+# treated as wedged rather than slow to observe its stop event.
+STALL_GRACE_SECONDS = 60.0
 
-    Returns HTTP 503 when the model is not initialized. This prevents the
-    kubelet from routing traffic to a pod that lost its model state (e.g.,
-    after an OOM event that killed the loader thread but not the HTTP server
-    process). A 503 here causes Kubernetes to remove the pod from the
-    Service's Endpoints slice immediately, eliminating bad requests at the
-    load balancer level rather than at the application level.
+
+def _inference_stalled() -> bool:
+    """
+    True when a worker thread has overrun the request deadline by a wide margin.
+
+    On timeout the stop event halts llama.cpp at the next token boundary,
+    which takes well under a second. A thread still inside the native call
+    STALL_GRACE_SECONDS after the deadline is wedged: it holds the only
+    inference permit, so every queued request will time out behind it and
+    only a process restart recovers the pod.
+    """
+    if llm is None:
+        return False
+    return llm.busy_seconds() > settings.inference_timeout_seconds + STALL_GRACE_SECONDS
+
+
+@app.get("/health/live", response_model=LivenessResponse, tags=["operations"])
+async def liveness() -> LivenessResponse:
+    """
+    Liveness probe target: fails only when a restart would fix the problem.
+
+    A slow request or a long queue is not a liveness failure; KEDA handles
+    load by scaling out, and restarting a busy pod would discard its queue
+    and pay the model load cost again. The two signals that do warrant a
+    restart are a blocked event loop (this handler cannot answer, so the
+    probe times out) and a wedged inference thread.
+    """
+    if _inference_stalled():
+        raise HTTPException(
+            status_code=503,
+            detail="Inference worker is stalled past its deadline.",
+        )
+    return LivenessResponse(status="alive")
+
+
+@app.get("/health/ready", response_model=HealthResponse, tags=["operations"])
+@app.get("/health", response_model=HealthResponse, include_in_schema=False)
+async def readiness() -> HealthResponse:
+    """
+    Readiness and startup probe target: gates traffic routing.
+
+    Not ready until the model is loaded, and not ready while the inference
+    worker is stalled, so the pod leaves the Service endpoints within one
+    readiness window, well before liveness restarts it. /health is kept as
+    an alias for existing clients and scripts.
     """
     if llm is None or not llm.is_ready():
         raise HTTPException(
             status_code=503,
             detail="Model not loaded. Pod is not ready to serve inference traffic.",
+        )
+    if _inference_stalled():
+        raise HTTPException(
+            status_code=503,
+            detail="Inference worker is stalled past its deadline.",
         )
     return HealthResponse(
         status="healthy",
