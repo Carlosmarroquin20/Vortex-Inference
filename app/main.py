@@ -20,6 +20,8 @@ Concurrency model:
 """
 
 import asyncio
+import contextvars
+import functools
 import hmac
 import logging
 import threading
@@ -41,17 +43,15 @@ from pydantic import BaseModel, Field
 from starlette.responses import Response
 
 from app.config import Settings
+from app.logging_config import RequestContextMiddleware, configure_logging
 from app.models.llm_loader import LLMLoader
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-# logfmt-style format aligns with Promtail/Loki's default parser configuration,
-# enabling label extraction without a custom pipeline stage.
-logging.basicConfig(
-    level=logging.INFO,
-    format="ts=%(asctime)s level=%(levelname)s logger=%(name)s msg=%(message)s",
-)
+# logfmt output aligns with Promtail/Loki's built-in logfmt parser, enabling
+# label extraction without a custom pipeline stage. See app/logging_config.py.
+configure_logging()
 logger = logging.getLogger("vortex.inference")
 
 # ---------------------------------------------------------------------------
@@ -172,11 +172,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global llm, _inference_semaphore
 
     logger.info(
-        f"Starting inference engine initialization. "
-        f"model_path={settings.model_path} "
-        f"n_ctx={settings.n_ctx} "
-        f"n_threads={settings.n_threads} "
-        f"n_gpu_layers={settings.n_gpu_layers}"
+        "Starting inference engine initialization.",
+        extra={
+            "model_path": settings.model_path,
+            "n_ctx": settings.n_ctx,
+            "n_threads": settings.n_threads,
+            "n_gpu_layers": settings.n_gpu_layers,
+        },
     )
 
     load_start = time.monotonic()
@@ -184,7 +186,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         llm = LLMLoader(settings)
     except Exception as exc:
         logger.critical(
-            f"Fatal: model failed to load. Triggering CrashLoopBackOff. error={exc}"
+            "Model failed to load. Exiting so Kubernetes applies CrashLoopBackOff.",
+            exc_info=True,
         )
         raise RuntimeError(
             "Inference server cannot start without a valid model. "
@@ -194,7 +197,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     load_duration = time.monotonic() - load_start
     MODEL_LOAD_DURATION_SECONDS.set(load_duration)
     logger.info(
-        f"Model loaded. duration_seconds={load_duration:.2f} ready_for_traffic=true"
+        "Model loaded. Ready for traffic.",
+        extra={"duration_seconds": round(load_duration, 2)},
     )
 
     _inference_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
@@ -218,16 +222,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     pending = set(_drain_tasks)
     if pending:
         logger.info(
-            f"Shutdown signal received. Waiting for {len(pending)} "
-            "abandoned inference thread(s) to exit."
+            "Shutdown signal received. Waiting for abandoned inference threads.",
+            extra={"threads": len(pending)},
         )
         _, still_running = await asyncio.wait(
             pending, timeout=settings.inference_timeout_seconds
         )
         if still_running:
             logger.error(
-                f"{len(still_running)} inference thread(s) did not exit before "
-                "the shutdown deadline."
+                "Inference threads did not exit before the shutdown deadline.",
+                extra={"threads": len(still_running)},
             )
     logger.info("Shutdown complete.")
 
@@ -249,6 +253,7 @@ app = FastAPI(
     redoc_url="/redoc" if settings.enable_docs else None,
     openapi_url="/openapi.json" if settings.enable_docs else None,
 )
+app.add_middleware(RequestContextMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -456,9 +461,14 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         # released — the Llama object is not thread-safe, and releasing the
         # semaphore while the thread is still inside llm.generate() would allow
         # a second request to enter, corrupting shared C++ model state.
+        #
+        # run_in_executor does not propagate context variables to the worker
+        # thread, so the call is wrapped in a copy of the current context to
+        # keep the request ID on log lines emitted from inside generate().
+        ctx = contextvars.copy_context()
         fut = loop.run_in_executor(
             None,
-            llm.generate,
+            functools.partial(ctx.run, llm.generate),
             request.prompt,
             request.max_tokens,
             request.temperature,
@@ -497,8 +507,11 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
 
             INFERENCE_REQUESTS_TOTAL.labels(status="timeout").inc()
             logger.error(
-                f"Inference timeout after {settings.inference_timeout_seconds}s. "
-                f"Consider reducing max_tokens or scaling out replicas."
+                "Inference exceeded its deadline. Worker thread signalled to stop.",
+                extra={
+                    "timeout_seconds": settings.inference_timeout_seconds,
+                    "max_tokens": request.max_tokens,
+                },
             )
             timeout_s = settings.inference_timeout_seconds
             raise HTTPException(
@@ -521,11 +534,14 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         TOKENS_PER_SECOND.set(tps)
 
         logger.info(
-            f"inference_complete "
-            f"duration_seconds={duration:.3f} "
-            f"tokens_prompt={result['tokens_prompt']} "
-            f"tokens_completion={result['tokens_completion']} "
-            f"tps={tps:.2f}"
+            "Inference complete.",
+            extra={
+                "duration_seconds": round(duration, 3),
+                "tokens_prompt": result["tokens_prompt"],
+                "tokens_completion": result["tokens_completion"],
+                "tokens_per_second": round(tps, 2),
+                "finish_reason": result["finish_reason"],
+            },
         )
 
         return CompletionResponse(
@@ -571,5 +587,8 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=settings.port,
         workers=1,  # Single worker is mandatory: model state is process-local.
-        log_level="info",  # uvicorn access logs complement Prometheus metrics.
+        log_level="info",
+        # RequestContextMiddleware writes the access log with request IDs;
+        # uvicorn's own access log would duplicate every line without them.
+        access_log=False,
     )

@@ -95,8 +95,11 @@ EXPOSE 8080
 # Multiple uvicorn workers would each load a separate copy of the model,
 # exceeding the 4Gi memory limit and triggering an OOM kill from the kubelet.
 # Horizontal scaling is handled externally by KEDA.
+# --no-access-log: the application writes its own access log with request IDs
+# (app/logging_config.py); uvicorn's would duplicate every line without them.
 CMD ["python", "-m", "uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \
      "--workers", "1", \
-     "--log-level", "info"]
+     "--log-level", "info", \
+     "--no-access-log"]

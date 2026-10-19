@@ -37,11 +37,8 @@ class LLMLoader:
         self._busy_since: float | None = None
 
         logger.info(
-            f"Loading GGUF model from disk. "
-            f"path={settings.model_path} "
-            f"n_ctx={settings.n_ctx} "
-            f"n_threads={settings.n_threads} "
-            f"n_gpu_layers={settings.n_gpu_layers}"
+            "Loading GGUF model from disk.",
+            extra={"model_path": settings.model_path},
         )
 
         # verbose=False suppresses llama.cpp's per-token C++ stderr output.
