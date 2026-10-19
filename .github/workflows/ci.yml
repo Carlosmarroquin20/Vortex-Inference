@@ -5,11 +5,29 @@ name: CI
 # is cheaper than a failed deployment to a shared environment. These checks
 # are intentionally lightweight — no cluster is provisioned, no model is
 # downloaded. The goal is fast feedback (< 3 minutes) on structural validity.
+#
+# Runners are pinned to ubuntu-24.04 rather than ubuntu-latest: the latest
+# label moves to new Ubuntu releases on GitHub's schedule, changing
+# preinstalled tool versions underneath the pipeline without a commit here.
+# Each job carries a timeout so a hung step fails fast instead of holding a
+# runner for the 6-hour default.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
+# Least privilege for the automatic GITHUB_TOKEN. No job pushes, comments or
+# publishes, so read access to the repository is all any of them needs.
+# Jobs that later require more must request it explicitly at job level.
+permissions:
+  contents: read
+
+# A newer push to the same pull request supersedes the running checks.
+# Pushes to main are never cancelled so every merged commit gets a verdict.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -20,7 +38,8 @@ jobs:
   # ---------------------------------------------------------------------------
   lint:
     name: Lint Python
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -50,7 +69,8 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: Test Python
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -83,7 +103,8 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-build:
     name: Build Docker Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -118,7 +139,8 @@ jobs:
   # ---------------------------------------------------------------------------
   validate-k8s:
     name: Validate Kubernetes Manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
