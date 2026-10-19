@@ -112,10 +112,8 @@ kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/monitoring/prometheus-rules.yaml
 kubectl apply -f k8s/monitoring/servicemonitor.yaml
 
-log_warn "Skipping deployment.yaml and keda-autoscaler.yaml until model is loaded."
-log_warn "After model is available, run:"
-log_warn "  kubectl apply -f k8s/deployment.yaml"
-log_warn "  kubectl apply -f k8s/keda-autoscaler.yaml"
+log_warn "Skipping the workload (Deployment, PDB, ScaledObject) until the model is loaded."
+log_warn "After the model is available, run: make deploy"
 
 # =============================================================================
 # 6. Build the Docker image inside Minikube's Docker daemon
@@ -135,7 +133,6 @@ echo "  1. scripts/download-model.sh"
 echo "  2. minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models/"
 echo "  3. eval \$(minikube docker-env)"
 echo "  4. docker build -f docker/Dockerfile -t vortex-inference:1.0.0 ."
-echo "  5. kubectl apply -f k8s/deployment.yaml"
-echo "  6. kubectl apply -f k8s/keda-autoscaler.yaml"
-echo "  7. minikube tunnel  (in a separate terminal)"
+echo "  5. make deploy    (Deployment, PodDisruptionBudget, ScaledObject)"
+echo "  6. minikube tunnel  (in a separate terminal)"
 echo ""

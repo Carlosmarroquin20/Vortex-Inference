@@ -1,0 +1,31 @@
+---
+# PodDisruptionBudget for voluntary disruptions (node drains, cluster
+# upgrades, descheduler evictions). It does not affect KEDA scale-in, which
+# goes through the Deployment rather than the eviction API.
+#
+# maxUnavailable: 1 rather than minAvailable: 1. KEDA runs a single replica
+# whenever traffic is idle, and minAvailable: 1 at one replica forbids every
+# eviction, so `kubectl drain` would hang until someone deleted the PDB by
+# hand. maxUnavailable: 1 still guarantees that a drain at peak (3 replicas)
+# removes inference pods one at a time, each replacement passing its startup
+# probe before the next eviction, instead of taking out all capacity at once
+# and paying the 60-90s model load on every replica simultaneously.
+#
+# unhealthyPodEvictionPolicy: AlwaysAllow lets a pod that is not Ready (for
+# example stuck in CrashLoopBackOff on a missing model) be evicted even when
+# the budget is exhausted; it serves no traffic, so protecting it only
+# blocks maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vortex-inference
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: disruption-budget
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-inference

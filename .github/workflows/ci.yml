@@ -251,6 +251,7 @@ jobs:
             k8s/configmap.yaml \
             k8s/model-pv.yaml \
             k8s/deployment.yaml \
+            k8s/pdb.yaml \
             k8s/service.yaml
 
       - name: Validate CRD-based manifests (YAML syntax via yq)

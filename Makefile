@@ -125,6 +125,7 @@ deploy: api-key
 	@kubectl apply -f k8s/monitoring/prometheus-rules.yaml
 	@kubectl apply -f k8s/monitoring/servicemonitor.yaml
 	@kubectl apply -f k8s/deployment.yaml
+	@kubectl apply -f k8s/pdb.yaml
 	@kubectl apply -f k8s/keda-autoscaler.yaml
 	@printf "$(GREEN)[deploy]$(NC) Waiting for rollout (model loading may take up to 90s)...\n"
 	@kubectl rollout status deployment/$(IMAGE_NAME) -n $(NAMESPACE) --timeout=300s
@@ -137,6 +138,7 @@ undeploy:
 	# historical metrics or dashboard state.
 	@printf "$(YELLOW)[undeploy]$(NC) Removing inference workload from $(NAMESPACE)...\n"
 	@kubectl delete -f k8s/keda-autoscaler.yaml --ignore-not-found
+	@kubectl delete -f k8s/pdb.yaml --ignore-not-found
 	@kubectl delete -f k8s/deployment.yaml --ignore-not-found
 	@kubectl delete -f k8s/service.yaml --ignore-not-found
 	@printf "$(YELLOW)[undeploy]$(NC) Workload removed. Monitoring stack intact.\n"
