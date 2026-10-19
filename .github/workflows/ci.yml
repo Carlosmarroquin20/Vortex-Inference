@@ -16,6 +16,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly run with no code change: new CVEs are published against
+  # dependencies and base image packages that have not changed here, and
+  # the dependency audit and image scan only catch them if they run.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 # Least privilege for the automatic GITHUB_TOKEN. No job pushes, comments or
 # publishes, so read access to the repository is all any of them needs.
@@ -95,11 +101,69 @@ jobs:
         run: pytest --cov --cov-report=term-missing
 
   # ---------------------------------------------------------------------------
-  # Job 3: Docker build
+  # Job 3: Dependency vulnerability audit
+  # pip-audit checks every pinned package, and everything it pulls in,
+  # against the PyPI advisory database. Any known vulnerability fails the job.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: Audit Python Dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install "$(grep -E '^pip-audit==' requirements-dev.txt)"
+
+      - name: Audit runtime dependencies (transitive)
+        # Resolves the full dependency tree. llama-cpp-python is excluded here
+        # because resolving it means compiling it from source; the next step
+        # audits its pinned version directly.
+        run: |
+          grep -v '^llama-cpp-python' requirements.txt > "${RUNNER_TEMP}/requirements-audit.txt"
+          pip-audit --strict --progress-spinner off -r "${RUNNER_TEMP}/requirements-audit.txt"
+
+      - name: Audit direct pins (including llama-cpp-python)
+        run: |
+          pip-audit --strict --progress-spinner off --no-deps --disable-pip -r requirements.txt
+          pip-audit --strict --progress-spinner off --no-deps --disable-pip -r requirements-dev.txt
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Dockerfile and shell script linting
+  # Both linters run from images pinned by digest, so findings do not change
+  # when the runner image updates its own copies of the tools.
+  # ---------------------------------------------------------------------------
+  lint-infra:
+    name: Lint Dockerfile and Scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: hadolint
+        run: |
+          docker run --rm -i \
+            hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d \
+            < docker/Dockerfile
+
+      - name: shellcheck
+        run: |
+          docker run --rm -v "${PWD}:/mnt:ro" -w /mnt \
+            koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            scripts/*.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Docker build and image scan
   # Validates the multi-stage Dockerfile compiles successfully.
   # llama-cpp-python compilation (~5–8 min) is the most common failure point
   # when system library versions or CMake flags change.
-  # The built image is NOT pushed — it serves only as a build validity check.
+  # The built image is NOT pushed. It is loaded into the runner's daemon so
+  # Trivy can scan exactly what was built, OS packages and Python packages.
   # ---------------------------------------------------------------------------
   docker-build:
     name: Build Docker Image
@@ -117,14 +181,28 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: false
+          load: true
           tags: vortex-inference:ci-${{ github.sha }}
           # Cache layers between runs to avoid recompiling llama-cpp-python
           # on every push. Cache hits reduce this job from ~8min to ~30s.
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Scan image (Trivy)
+        # Fails on HIGH or CRITICAL findings that have a fix available.
+        # Unfixed findings are reported by upstream with no remediation path,
+        # so gating on them would block every build without making the image
+        # safer. The weekly scheduled run picks up newly published CVEs.
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress \
+            "vortex-inference:ci-${{ github.sha }}"
+
   # ---------------------------------------------------------------------------
-  # Job 4: Kubernetes manifest validation
+  # Job 6: Kubernetes manifest validation
   # Validates YAML structure and Kubernetes API schema without a live cluster.
   # kubeconform checks manifests against the published OpenAPI JSON schemas,
   # catching field typos, missing required fields, and API version mismatches
