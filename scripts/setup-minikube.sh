@@ -130,11 +130,12 @@ log_warn "Skipping the workload (Deployment, PDB, ScaledObject) until the model 
 log_warn "After the model is available, run: make deploy"
 
 # =============================================================================
-# 6. Build the Docker image inside Minikube's Docker daemon
+# 6. Container image
 # =============================================================================
-log_info "Building inference server image inside Minikube Docker daemon..."
-log_warn "This step runs 'eval \$(minikube docker-env)' which affects the current shell."
-log_warn "Run manually: eval \$(minikube docker-env) && docker build -f docker/Dockerfile -t vortex-inference:1.0.0 ."
+# Not built here: `make build` builds with the host Docker daemon and loads
+# the image into the node with `minikube image load`, which works with the
+# containerd runtime that minikube 1.39 uses by default.
+log_warn "Build and load the inference image with: make build"
 
 # =============================================================================
 # Summary
@@ -145,8 +146,7 @@ echo ""
 echo "  Next steps:"
 echo "  1. scripts/download-model.sh"
 echo "  2. minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models/"
-echo "  3. eval \$(minikube docker-env)"
-echo "  4. docker build -f docker/Dockerfile -t vortex-inference:1.0.0 ."
-echo "  5. make deploy    (Deployment, PodDisruptionBudget, ScaledObject)"
-echo "  6. minikube tunnel  (in a separate terminal)"
+echo "  3. make build     (build the image and load it into the node)"
+echo "  4. make deploy    (Deployment, PodDisruptionBudget, ScaledObject)"
+echo "  5. minikube tunnel  (in a separate terminal)"
 echo ""

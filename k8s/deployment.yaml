@@ -99,8 +99,8 @@ spec:
       containers:
       - name: inference-server
         image: vortex-inference:1.0.0
-        # imagePullPolicy=Never is required for Minikube when the image is built
-        # locally with: eval $(minikube docker-env) && docker build ...
+        # imagePullPolicy=Never is required for Minikube when the image is
+        # loaded into the node with `make build` (minikube image load).
         # In production, change to IfNotPresent and push to a registry.
         imagePullPolicy: Never
         ports:

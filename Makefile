@@ -51,7 +51,7 @@ help:
 	@printf "  $(GREEN)Bootstrap$(NC)\n"
 	@printf "    make setup       Start Minikube, install KEDA + kube-prometheus-stack\n"
 	@printf "    make model       Download Phi-3-mini GGUF model (~2.4GB)\n"
-	@printf "    make build       Build Docker image inside Minikube daemon\n"
+	@printf "    make build       Build the image and load it into minikube\n"
 	@printf "    make api-key     Create the API key Secret if it does not exist\n"
 	@printf "    make dashboard   Provision the Grafana dashboard via the sidecar\n"
 	@printf "    make deploy      Apply all Kubernetes manifests\n"
@@ -83,19 +83,22 @@ model:
 	@printf "$(GREEN)[model]$(NC) Downloading Phi-3-mini GGUF model...\n"
 	@bash scripts/download-model.sh
 
+# Builds with the host's Docker daemon, then copies the image into the
+# cluster's container runtime. `minikube docker-env` is not used: it only
+# works when the node runs the Docker runtime, and minikube 1.39 defaults to
+# containerd. `minikube image load` works with either runtime and is what
+# makes imagePullPolicy: Never in the Deployment resolve without a registry.
 build:
-	# eval + minikube docker-env redirects Docker CLI to Minikube's daemon.
-	# Images built this way are immediately available to pods without a registry push —
-	# the critical enabler for imagePullPolicy: Never in the Deployment manifest.
-	@printf "$(GREEN)[build]$(NC) Building $(FULL_IMAGE) inside Minikube Docker daemon...\n"
-	@eval $$(minikube docker-env) && \
-		docker build \
-			-f docker/Dockerfile \
-			-t $(FULL_IMAGE) \
-			--label "git.commit=$$(git rev-parse --short HEAD)" \
-			--label "build.timestamp=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-			.
-	@printf "$(GREEN)[build]$(NC) Image $(FULL_IMAGE) built successfully.\n"
+	@printf "$(GREEN)[build]$(NC) Building $(FULL_IMAGE)...\n"
+	@docker build \
+		-f docker/Dockerfile \
+		-t $(FULL_IMAGE) \
+		--label "git.commit=$$(git rev-parse --short HEAD)" \
+		--label "build.timestamp=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		.
+	@printf "$(GREEN)[build]$(NC) Loading $(FULL_IMAGE) into the minikube node...\n"
+	@minikube image load $(FULL_IMAGE)
+	@printf "$(GREEN)[build]$(NC) Image $(FULL_IMAGE) available in the cluster.\n"
 
 api-key:
 	# Generates the API key Secret only when it is missing, so re-running deploy

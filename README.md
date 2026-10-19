@@ -109,9 +109,8 @@ bash scripts/setup-minikube.sh
 # 4. Copy model into Minikube node
 minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models/
 
-# 5. Build the container image inside Minikube's Docker daemon
-eval $(minikube docker-env)
-docker build -f docker/Dockerfile -t vortex-inference:1.0.0 .
+# 5. Build the container image and load it into the minikube node
+make build
 
 # 6. Deploy the inference workload
 kubectl apply -f k8s/deployment.yaml
