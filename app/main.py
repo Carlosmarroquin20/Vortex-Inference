@@ -123,6 +123,37 @@ llm: LLMLoader | None = None
 # because asyncio primitives must be created inside a running event loop.
 _inference_semaphore: asyncio.Semaphore | None = None
 
+# Strong references to in-flight drain tasks. The event loop holds tasks only
+# weakly, so an unreferenced create_task() result can be garbage-collected
+# before it completes, and with it the only code path that releases the
+# semaphore permit. The set is also what shutdown waits on.
+_drain_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _drain_and_release(fut: asyncio.Future, sem: asyncio.Semaphore) -> None:
+    """
+    Waits for an abandoned inference thread to exit, then releases its permit.
+
+    The permit must outlive the request that abandoned the thread: releasing
+    it earlier would let the next queued request enter the non-thread-safe
+    Llama object concurrently with the call that is still unwinding.
+    """
+    try:
+        await fut
+    except Exception:
+        # The client has already been answered; the failure is only worth logging.
+        logger.exception("Abandoned inference thread raised while draining.")
+    finally:
+        sem.release()
+        INFERENCE_ACTIVE_REQUESTS.dec()
+        logger.info("Abandoned inference thread drained. Semaphore released.")
+
+
+def _hand_off_permit(fut: asyncio.Future, sem: asyncio.Semaphore) -> None:
+    task = asyncio.get_running_loop().create_task(_drain_and_release(fut, sem))
+    _drain_tasks.add(task)
+    task.add_done_callback(_drain_tasks.discard)
+
 
 # ---------------------------------------------------------------------------
 # Application Lifespan
@@ -178,10 +209,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield  # ← Application serves traffic here
 
-    # Graceful shutdown: allow the semaphore to drain in-flight requests
-    # before the process exits. The terminationGracePeriodSeconds in the
-    # Deployment spec must be long enough to cover worst-case inference duration.
-    logger.info("Shutdown signal received. Draining in-flight requests.")
+    # Graceful shutdown. uvicorn has stopped accepting connections and waited
+    # for open requests; any request it had to cancel handed its worker
+    # thread to a drain task. Waiting for those threads matters because the
+    # Llama object is freed when the process tears down, and native code still
+    # running against it would crash instead of exiting cleanly.
+    # terminationGracePeriodSeconds must cover this wait plus the preStop sleep.
+    pending = set(_drain_tasks)
+    if pending:
+        logger.info(
+            f"Shutdown signal received. Waiting for {len(pending)} "
+            "abandoned inference thread(s) to exit."
+        )
+        _, still_running = await asyncio.wait(
+            pending, timeout=settings.inference_timeout_seconds
+        )
+        if still_running:
+            logger.error(
+                f"{len(still_running)} inference thread(s) did not exit before "
+                "the shutdown deadline."
+            )
+    logger.info("Shutdown complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -376,34 +424,29 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             result = await asyncio.wait_for(
                 asyncio.shield(fut), timeout=settings.inference_timeout_seconds
             )
-        except asyncio.TimeoutError:
-            # Signal llama.cpp to stop at the next token boundary via the
-            # stopping_criteria callback in LLMLoader.generate().
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            # Both paths leave the worker thread running inside llama.cpp.
+            # Signal it to stop at the next token boundary via the
+            # stopping_criteria callback in LLMLoader.generate(), and hand the
+            # permit to a drain task that releases it only once the thread
+            # has exited. The response (or the cancellation) proceeds
+            # immediately instead of blocking on the draining thread.
+            #
+            # CancelledError must be handled here explicitly: it derives from
+            # BaseException, so without this clause it bypassed the old
+            # timeout-only branch and the finally block released the permit
+            # while the thread was still inside the non-thread-safe model.
             stop_event.set()
-
-            # Hold the semaphore until the thread exits. A background task
-            # does this so the 504 response is returned to the client
-            # immediately rather than blocking on the draining thread.
+            _hand_off_permit(fut, _inference_semaphore)
             _drain_pending = True
 
-            # Capture the semaphore object by value so the background task
-            # releases the correct instance even if the module-level reference
-            # is replaced (e.g., during a shutdown/restart cycle).
-            _sem = _inference_semaphore
-
-            async def _drain_and_release() -> None:
-                try:
-                    await fut
-                except Exception:
-                    pass
-                finally:
-                    _sem.release()
-                    INFERENCE_ACTIVE_REQUESTS.dec()
-                    logger.info(
-                        "Timed-out inference thread drained. Semaphore released."
-                    )
-
-            asyncio.create_task(_drain_and_release())
+            if isinstance(exc, asyncio.CancelledError):
+                INFERENCE_REQUESTS_TOTAL.labels(status="cancelled").inc()
+                logger.warning(
+                    "Inference cancelled before completion. Worker thread "
+                    "signalled to stop."
+                )
+                raise
 
             INFERENCE_REQUESTS_TOTAL.labels(status="timeout").inc()
             logger.error(
@@ -462,9 +505,10 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         ) from exc
 
     finally:
-        # On the timeout path, _drain_and_release() owns the semaphore release
-        # and gauge decrement once the thread exits. All other paths (success,
-        # error, client disconnect during queue wait) are handled here.
+        # On the timeout and cancellation paths, _drain_and_release() owns the
+        # semaphore release and gauge decrement once the thread exits. All
+        # other paths (success, error, cancellation while still queued) are
+        # handled here.
         if not _drain_pending:
             if _semaphore_acquired:
                 _inference_semaphore.release()
