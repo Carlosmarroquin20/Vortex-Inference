@@ -56,6 +56,12 @@ NAMESPACE="vortex-inference"
 SVCNAME="vortex-inference-lb"
 API_KEY_SECRET="vortex-inference-api-key"
 
+# Private scratch directory for response bodies and batch results. Fixed
+# names under /tmp are predictable, which on a shared host lets another user
+# pre-create them as symlinks; mktemp -d creates a fresh 0700 directory.
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
 # Test prompts — varied to avoid KV-cache hits that would shorten inference time.
 # Shorter active_requests windows produce weaker KEDA signals.
 PROMPTS=(
@@ -123,12 +129,12 @@ send_request() {
     local prompt="${PROMPTS[$prompt_index]}"
     local request_id=$2
 
-    local response
+    local response_file="${WORK_DIR}/response_${request_id}.json"
     local http_code
     local start_time
     start_time=$(date +%s%N)
 
-    http_code=$(curl -s -o /tmp/vortex_response_${request_id}.json \
+    http_code=$(curl -s -o "${response_file}" \
         -w "%{http_code}" \
         --max-time 150 \
         -X POST "${endpoint}/v1/completions" \
@@ -146,20 +152,24 @@ send_request() {
 
     if [ "${http_code}" = "200" ]; then
         local tps
-        tps=$(python3 -c "
+        # The path is passed as an argument rather than interpolated into the
+        # Python source, so no shell value is ever evaluated as code.
+        tps=$(python3 -c '
 import json, sys
 try:
-    data = json.load(open('/tmp/vortex_response_${request_id}.json'))
-    print(f\"{data.get('performance', {}).get('tokens_per_second', 0):.1f}\")
-except:
-    print('N/A')
-" 2>/dev/null || echo "N/A")
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+    tps = data.get("performance", {}).get("tokens_per_second", 0)
+    print(f"{tps:.1f}")
+except Exception:
+    print("N/A")
+' "${response_file}" 2>/dev/null || echo "N/A")
         echo -e "  ${GREEN}[req-${request_id}]${NC} OK | ${duration_ms}ms | ${tps} tok/s" >&2
     else
         echo -e "  ${RED}[req-${request_id}]${NC} HTTP ${http_code} | ${duration_ms}ms" >&2
     fi
 
-    rm -f "/tmp/vortex_response_${request_id}.json"
+    rm -f "${response_file}"
 
     # stdout carries only the status code because callers capture it with
     # $(...) for the tally. Progress lines go to stderr so they reach the
@@ -251,7 +261,7 @@ echo ""
 # Start background replica monitor — killed automatically on script exit
 monitor_replicas &
 MONITOR_PID=$!
-trap "kill ${MONITOR_PID} 2>/dev/null; exit" INT TERM EXIT
+trap 'kill "${MONITOR_PID}" 2>/dev/null; rm -rf "${WORK_DIR}"; exit' INT TERM EXIT
 
 # Track results
 SUCCESS_COUNT=0
@@ -270,7 +280,7 @@ while [ "${REQUEST_COUNTER}" -lt "${TOTAL_REQUESTS}" ]; do
     log_info "Sending batch of ${BATCH_SIZE} concurrent requests (${REQUEST_COUNTER}/${TOTAL_REQUESTS} done)..."
 
     PIDS=()
-    RESULTS_FILE="/tmp/vortex_batch_results_$$"
+    RESULTS_FILE="${WORK_DIR}/batch_results"
 
     for (( i=0; i<BATCH_SIZE; i++ )); do
         REQUEST_ID=$(( REQUEST_COUNTER + i ))
