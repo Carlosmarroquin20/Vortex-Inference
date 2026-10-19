@@ -19,7 +19,7 @@ import re
 import time
 import uuid
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -51,7 +51,7 @@ def _logfmt_value(value: object) -> str:
 
 class LogfmtFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        ts = datetime.fromtimestamp(record.created, tz=UTC)
         pairs: list[tuple[str, object]] = [
             ("ts", ts.isoformat(timespec="milliseconds").replace("+00:00", "Z")),
             ("level", record.levelname.lower()),

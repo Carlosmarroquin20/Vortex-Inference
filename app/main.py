@@ -27,8 +27,9 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncGenerator, Literal
+from typing import Annotated, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -283,7 +284,9 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def require_api_key(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+    ],
 ) -> None:
     """
     Enforces the shared bearer token when VORTEX_API_KEY is configured.
@@ -542,7 +545,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             result = await asyncio.wait_for(
                 asyncio.shield(fut), timeout=settings.inference_timeout_seconds
             )
-        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        except (TimeoutError, asyncio.CancelledError) as exc:
             # Both paths leave the worker thread running inside llama.cpp.
             # Signal it to stop at the next token boundary via the
             # stopping_criteria callback in LLMLoader.generate(), and hand the
@@ -583,7 +586,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
                     f"Inference exceeded {timeout_s}s timeout. "
                     "Reduce max_tokens or retry when the service has scaled out."
                 ),
-            )
+            ) from exc
 
         duration = time.monotonic() - request_start
         tps = result["tokens_completion"] / duration if duration > 0 else 0.0
@@ -678,7 +681,11 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
+        # Loopback only: this entry point is for local development, where
+        # authentication is off unless VORTEX_API_KEY is set. Binding all
+        # interfaces would expose an open inference API to the local network.
+        # The container image passes --host 0.0.0.0 explicitly in its CMD.
+        host="127.0.0.1",
         port=settings.port,
         workers=1,  # Single worker is mandatory: model state is process-local.
         log_level="info",

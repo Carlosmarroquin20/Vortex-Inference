@@ -7,9 +7,14 @@ target-version = "py311"  # matches the python:3.11-slim runtime image
 line-length = 88
 
 [tool.ruff.lint]
-# E/W: pycodestyle, F: pyflakes, I: isort. Kept in sync with what CI enforces
-# so `ruff check` locally gives the same verdict as the pipeline.
-select = ["E", "W", "F", "I"]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear (likely bugs),
+# UP: pyupgrade (idioms for the target version), S: bandit (security),
+# ASYNC: blocking calls in async code, SIM: simplifications.
+select = ["E", "W", "F", "I", "B", "UP", "S", "ASYNC", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's assertion rewriting is the point of using bare asserts in tests.
+"tests/**" = ["S101"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]

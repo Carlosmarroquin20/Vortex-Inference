@@ -52,7 +52,8 @@ class FakeLlama:
                 raise self.error
 
             completed = 0
-            for completed in range(1, self.steps + 1):
+            while completed < self.steps:
+                completed += 1
                 if self.step_delay:
                     time.sleep(self.step_delay)
                 if stopping_criteria is not None and stopping_criteria([], []):

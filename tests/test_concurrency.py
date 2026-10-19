@@ -8,6 +8,7 @@ number of concurrent calls it observed, which must never exceed one.
 """
 
 import asyncio
+import contextlib
 
 import app.main as main
 from app.main import CompletionRequest, create_completion
@@ -53,10 +54,8 @@ def test_cancelled_request_keeps_permit_until_its_thread_exits():
         first = asyncio.create_task(create_completion(CompletionRequest(prompt="a")))
         await _wait_until_inside_model(fake)
         first.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await first
-        except asyncio.CancelledError:
-            pass
 
         fake.steps = 1
         await create_completion(CompletionRequest(prompt="b"))
@@ -76,10 +75,8 @@ def test_shutdown_waits_for_abandoned_threads():
         task = asyncio.create_task(create_completion(CompletionRequest(prompt="a")))
         await _wait_until_inside_model(fake)
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
         return fake
 
     # Leaving the lifespan context runs the shutdown path, which must not

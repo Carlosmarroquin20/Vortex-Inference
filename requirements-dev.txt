@@ -17,4 +17,4 @@ httpx2==2.13.1
 # claim. Pinned to a release whose schema was verified against the server.
 openai==3.24.0
 
-ruff==0.4.4
+ruff==0.16.10
