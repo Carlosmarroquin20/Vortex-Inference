@@ -33,6 +33,20 @@ data:
   # throttling-induced latency spikes under CFS scheduling pressure.
   VORTEX_N_THREADS: "2"
 
+  # Thread pools of the native libraries must match VORTEX_N_THREADS.
+  # OpenBLAS and the OpenMP runtime size their pools from the CPUs the
+  # process can see, which is the whole node (the container's CPU limit is
+  # not reflected in nproc). On an 8-CPU node with a 3.5-CPU limit they
+  # oversubscribe the cgroup quota and the kernel throttles the container.
+  # Measured on minikube with a 250m limit: 39 threads, throttled in 65% of
+  # scheduling periods, 0.5 tokens/s; capped, 5 threads and >1000 tokens/s.
+  # They are read when the libraries load, so they must be set in the
+  # environment at process start rather than by the application.
+  # Keep all three equal and no higher than the container's CPU limit: on
+  # the same 250m limit, two threads instead of one fell back to 0.8 tokens/s.
+  OMP_NUM_THREADS: "2"
+  OPENBLAS_NUM_THREADS: "2"
+
   # Full CPU inference. Set to "-1" to offload all layers to GPU when
   # running on a node with NVIDIA device plugin enabled.
   VORTEX_N_GPU_LAYERS: "0"
