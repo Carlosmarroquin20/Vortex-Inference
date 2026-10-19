@@ -96,8 +96,15 @@ WORKDIR /app
 # Install pre-built wheels from the builder stage.
 # This avoids re-compiling llama-cpp-python in CI and keeps layer caching
 # efficient — the wheels layer only invalidates when requirements.txt changes.
+#
+# setuptools and wheel ship with the python base image but nothing imports
+# them at runtime. They are removed rather than upgraded: setuptools vendors
+# its own copies of wheel and jaraco.context, which image scanners report as
+# fixable HIGH CVEs, and code that is not present cannot be exploited.
 COPY --from=builder /dist /dist
-RUN pip install --no-cache-dir /dist/*.whl && rm -rf /dist
+RUN pip install --no-cache-dir /dist/*.whl \
+    && rm -rf /dist \
+    && pip uninstall --yes setuptools wheel
 
 # Build-time guard: load the native library and fail the build if the BLAS
 # backend is not compiled in, or if a shared library the wheel depends on is
