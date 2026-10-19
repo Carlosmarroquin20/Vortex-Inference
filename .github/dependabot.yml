@@ -40,6 +40,16 @@ updates:
       default-days: 7
     commit-message:
       prefix: "build(docker)"
+    # Only digest refreshes of the current Python line (security rebuilds of
+    # 3.11-slim-trixie). Dependabot reads the Python version in the tag as
+    # semver, so 3.11 -> 3.14 arrives as a "minor" update. Moving Python
+    # versions changes the interpreter ABI that the compiled llama.cpp wheel
+    # targets, and is a deliberate migration, not a routine bump.
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: github-actions
     directory: /
