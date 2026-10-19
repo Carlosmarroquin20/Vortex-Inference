@@ -1,0 +1,55 @@
+# Every dependency in this repository is pinned exactly: Python packages by
+# version, the base image by digest, and GitHub Actions by commit SHA. Pins
+# make builds reproducible but go stale silently; Dependabot turns each
+# upstream release into a pull request that runs the full CI, including the
+# dependency audit and the image scan.
+#
+# cooldown delays proposals for a week after a release. Most malicious
+# package releases are detected and yanked within days, and a short wait
+# also skips the broken releases that are typically followed by a quick
+# patch.
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Routine minor and patch updates arrive as one pull request.
+      # llama-cpp-python is excluded so every bump of the native inference
+      # engine is reviewed on its own: its releases track llama.cpp, which
+      # changes build flags and the GGUF loader between minor versions.
+      python-minor-and-patch:
+        patterns: ["*"]
+        exclude-patterns: ["llama-cpp-python"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "build(docker)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]
