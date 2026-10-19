@@ -84,8 +84,8 @@ The 4Gi limit simulates a dense multi-tenant node or an edge deployment where ea
 ## Prerequisites
 
 - Docker Desktop
-- `minikube` ≥ 1.32
-- `kubectl` ≥ 1.28
+- `minikube` ≥ 1.39 (supports the pinned Kubernetes v1.35)
+- `kubectl` ≥ 1.34 (within one minor version of the cluster)
 - `helm` ≥ 3.14
 - `curl` or `wget`, and `sha256sum` or `shasum` — the model download is verified against a pinned SHA-256
 - 12GB free RAM, 8 CPU cores, 20GB disk

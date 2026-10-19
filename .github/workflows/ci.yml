@@ -245,7 +245,7 @@ jobs:
         # -strict rejects unknown and duplicated fields, which is where most
         # indentation and typo mistakes surface.
         run: |
-          kubeconform -strict -summary -kubernetes-version 1.30.0 \
+          kubeconform -strict -summary -kubernetes-version 1.35.9 \
             k8s/namespace.yaml \
             k8s/networkpolicy.yaml \
             k8s/configmap.yaml \

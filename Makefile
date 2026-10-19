@@ -21,10 +21,9 @@ IMAGE_NAME       := vortex-inference
 IMAGE_TAG        := 1.0.0
 API_KEY_SECRET   := vortex-inference-api-key
 MONITORING_NAMESPACE := monitoring
-KEDA_VERSION     := 2.14.0
-PROM_STACK_VER   := 58.4.0
-MINIKUBE_MEMORY  := 10240
-MINIKUBE_CPUS    := 8
+# Cluster sizing and component versions (Kubernetes, KEDA,
+# kube-prometheus-stack) live in scripts/setup-minikube.sh, which is what
+# `make setup` runs.
 
 # --- Color codes for output readability ---
 GREEN  := \033[0;32m

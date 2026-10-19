@@ -21,8 +21,15 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 MINIKUBE_MEMORY="10240"     # 10GB: leaves 2GB for the host OS during demos
 MINIKUBE_CPUS="8"         # 3 replicas x 2 CPU requests + system and monitoring pods
 MINIKUBE_DISK="20g"
-KEDA_VERSION="2.14.0"
-PROMETHEUS_STACK_VERSION="58.4.0"
+
+# Versions are pinned and chosen together. KEDA 2.21 is tested against
+# Kubernetes 1.34-1.36, so the cluster runs 1.35 rather than minikube's
+# floating "stable" (1.37 at the time of writing, outside KEDA's tested
+# window). The kubeconform step in CI validates against the same version;
+# bump all three together.
+KUBERNETES_VERSION="v1.35.9"
+KEDA_VERSION="2.21.0"
+PROMETHEUS_STACK_VERSION="91.9.0"
 NAMESPACE="vortex-inference"
 MONITORING_NAMESPACE="monitoring"
 
@@ -37,7 +44,7 @@ minikube start \
   --cpus="${MINIKUBE_CPUS}" \
   --disk-size="${MINIKUBE_DISK}" \
   --driver=docker \
-  --kubernetes-version=stable \
+  --kubernetes-version="${KUBERNETES_VERSION}" \
   --cni=calico \
   --addons=metrics-server
 
@@ -72,15 +79,19 @@ log_warn "Grafana credentials: user admin, password via 'make grafana-password'"
 # =============================================================================
 # 3. Install KEDA
 # =============================================================================
+# Installed from the versioned Helm chart rather than by applying a release
+# manifest URL: helm records the installed version, upgrades in place, and
+# --wait blocks until the operator and metrics server are ready, so the
+# ScaledObject applied later never races the CRD registration.
 log_info "Installing KEDA v${KEDA_VERSION}"
-kubectl apply -f "https://github.com/kedacore/keda/releases/download/v${KEDA_VERSION}/keda-${KEDA_VERSION}.yaml"
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update kedacore
 
-# Wait for KEDA controller to be ready before applying ScaledObjects
-log_info "Waiting for KEDA operator to become ready..."
-kubectl wait --for=condition=ready pod \
-  -l app=keda-operator \
-  -n keda \
-  --timeout=120s
+helm upgrade --install keda kedacore/keda \
+  --namespace keda \
+  --create-namespace \
+  --version "${KEDA_VERSION}" \
+  --wait --timeout=300s
 
 log_info "KEDA v${KEDA_VERSION} installed and ready."
 
