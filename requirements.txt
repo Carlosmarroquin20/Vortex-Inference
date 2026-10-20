@@ -24,3 +24,8 @@ pydantic-settings==2.15.0
 # Prometheus instrumentation
 # prometheus-client is the reference implementation — no dependencies, stable API.
 prometheus-client==0.26.0
+
+# HTTP client for remote inference backends (app/backends/openai_compatible.py).
+# httpx2 rather than httpx: it is the client Starlette 1.x and the OpenAI SDK
+# build on, so the image and the test suite share one HTTP stack.
+httpx2==2.13.1

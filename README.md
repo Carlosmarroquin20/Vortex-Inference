@@ -149,6 +149,51 @@ print(completion.choices[0].text)
 
 ---
 
+## Inference Backends
+
+`VORTEX_BACKEND` selects where completions come from. The API, authentication,
+metrics, probes and autoscaling signal are the same for every backend.
+
+| Backend | Use it for | Model setting |
+|---|---|---|
+| `llama_cpp` (default) | Any GGUF model, run in-process on the pod's CPUs | `VORTEX_MODEL_PATH` (file on the PVC) |
+| `openai_compatible` | OpenAI, or a model served elsewhere by vLLM, Ollama, LM Studio, `llama-server` or a router such as OpenRouter | `VORTEX_MODEL_NAME` (the upstream model ID) |
+
+**Another local model.** Any GGUF file works without code changes: download it
+with `HF_REPO=... HF_FILENAME=... HF_REVISION=... MODEL_SHA256=... MODEL_SIZE=...
+bash scripts/download-model.sh`, point `VORTEX_MODEL_PATH`/`VORTEX_MODEL_NAME`/
+`VORTEX_N_CTX` at it, and resize the pod's memory limit to fit.
+
+**A model behind an API.** Larger models can run on a GPU machine under vLLM
+or Ollama, or at a hosted provider, with Vortex in front of them:
+
+```bash
+VORTEX_BACKEND=openai_compatible
+VORTEX_REMOTE_BASE_URL=https://api.openai.com/v1   # or http://<vllm-host>:8000/v1
+VORTEX_REMOTE_API_KEY=sk-...                       # omit for unauthenticated servers
+VORTEX_MODEL_NAME=<provider-model-id>              # sent upstream as "model"
+VORTEX_MAX_CONCURRENT_REQUESTS=16                  # generation is upstream, not on the pod
+```
+
+- `VORTEX_REMOTE_API_STYLE=chat` (default) sends the prompt as a single user
+  message to `/chat/completions`, the only endpoint current hosted models offer;
+  the model's chat template is applied upstream. `completions` forwards the raw
+  prompt to `/completions`, for base models on self-hosted servers.
+- OpenAI reasoning models need `VORTEX_REMOTE_MAX_TOKENS_FIELD=max_completion_tokens`
+  and may reject non-default `temperature`/`top_p`.
+- Upstream 400/413/422 responses are returned to the client as 400 with the
+  provider's message and counted as `rejected`. Other upstream failures become
+  502 (503 with `Retry-After` on rate limiting, 504 on timeouts) without
+  exposing upstream details; the cause is in the server log. A configuration
+  error that the provider reports as 400, such as an unsupported parameter,
+  therefore shows up as a rise in `rejected` requests and a WARNING per
+  request, not in the error ratio.
+- The Kubernetes manifests are sized for `llama_cpp`, and the NetworkPolicy
+  blocks all egress from the inference pods, so a remote backend does not
+  work in the cluster as shipped.
+
+---
+
 ## Observability
 
 ```bash
@@ -216,7 +261,8 @@ vortex-inference/
 │   └── backends/
 │       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND
 │       ├── base.py           # InferenceBackend protocol shared by every engine
-│       └── llamacpp.py       # Local GGUF inference via llama-cpp-python
+│       ├── llamacpp.py       # Local GGUF inference via llama-cpp-python
+│       └── openai_compatible.py # Remote inference over an OpenAI-compatible API
 ├── tests/                    # pytest suite against an in-process llama_cpp fake
 ├── docs/
 │   └── runbooks.md           # One runbook per alert, linked via runbook_url

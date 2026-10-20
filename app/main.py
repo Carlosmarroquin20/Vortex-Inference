@@ -1,5 +1,8 @@
 """
-Vortex Inference — FastAPI serving layer for GGUF-quantized language models.
+Vortex Inference — FastAPI serving layer for language models.
+
+Completions come from a pluggable backend (app/backends): a GGUF model run
+in-process by llama.cpp, or an OpenAI-compatible API.
 
 Architecture overview:
   This module is the single process entry point for all inference traffic.
@@ -13,10 +16,11 @@ Architecture overview:
   generation, not I/O wait.
 
 Concurrency model:
-  asyncio.Semaphore(1) serializes inference calls within a single pod.
-  Horizontal scaling via KEDA handles traffic spikes. This design keeps
-  the per-pod memory footprint predictable, which is the primary constraint
-  when operating under strict Kubernetes resource limits.
+  An asyncio.Semaphore sized by max_concurrent_requests bounds inference
+  calls within a pod. With llama.cpp it is 1, serializing access to the
+  model; horizontal scaling via KEDA handles traffic spikes, and the per-pod
+  memory footprint stays predictable under strict Kubernetes limits. Remote
+  backends are I/O-bound and can run with a higher limit.
 """
 
 import asyncio
@@ -28,6 +32,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
@@ -44,7 +49,13 @@ from prometheus_client import (
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.responses import Response
 
-from app.backends import InferenceBackend, PromptTooLongError, create_backend
+from app.backends import (
+    BackendError,
+    InferenceBackend,
+    PromptTooLongError,
+    RequestRejectedError,
+    create_backend,
+)
 from app.config import Settings
 from app.logging_config import (
     RequestContextMiddleware,
@@ -141,6 +152,14 @@ backend: InferenceBackend | None = None
 # because asyncio primitives must be created inside a running event loop.
 _inference_semaphore: asyncio.Semaphore | None = None
 
+# Dedicated worker pool, sized to the semaphore. asyncio's default executor
+# has min(32, cpu_count + 4) threads, which on a 2-CPU pod would cap a remote
+# backend at 6 concurrent calls whatever max_concurrent_requests says. A
+# separate pool also keeps inference from competing with any other use of
+# the default executor. One thread per permit is enough: a permit is held
+# until its thread exits, including after a timeout.
+_inference_executor: ThreadPoolExecutor | None = None
+
 # Strong references to in-flight drain tasks. The event loop holds tasks only
 # weakly, so an unreferenced create_task() result can be garbage-collected
 # before it completes, and with it the only code path that releases the
@@ -188,7 +207,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     the correct behavior when the underlying issue (missing file, corrupt
     weights, OOM) requires human intervention, not an immediate retry.
     """
-    global backend, _inference_semaphore
+    global backend, _inference_semaphore, _inference_executor
 
     logger.info(
         "Starting inference engine initialization.",
@@ -218,6 +237,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     _inference_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
+    _inference_executor = ThreadPoolExecutor(
+        max_workers=settings.max_concurrent_requests,
+        thread_name_prefix="inference",
+    )
 
     if settings.api_key is None:
         logger.warning(
@@ -249,6 +272,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Inference threads did not exit before the shutdown deadline.",
                 extra={"threads": len(still_running)},
             )
+    # wait=False: a thread that outlived the deadline above is not waited on
+    # again; the process exits regardless.
+    _inference_executor.shutdown(wait=False, cancel_futures=True)
+    backend.close()
     logger.info("Shutdown complete.")
 
 
@@ -391,6 +418,14 @@ class LivenessResponse(BaseModel):
 # treated as wedged rather than slow to observe its stop event.
 STALL_GRACE_SECONDS = 60.0
 
+# Client-facing text for BackendError, by status. The exception message holds
+# the upstream details and goes to the log only.
+_BACKEND_ERROR_DETAIL = {
+    502: "The inference backend failed to produce a completion.",
+    503: "The inference backend is overloaded. Retry later.",
+    504: "The inference backend did not respond in time.",
+}
+
 
 def _inference_stalled() -> bool:
     """
@@ -491,7 +526,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     If an immediate 429 were returned instead, the gauge would only reflect
     active (not queued) requests, and KEDA would underestimate true demand.
     """
-    if backend is None or _inference_semaphore is None:
+    if backend is None or _inference_semaphore is None or _inference_executor is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
 
     # Increment before acquiring the semaphore so queued requests contribute to
@@ -532,7 +567,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         # keep the request ID on log lines emitted from inside generate().
         ctx = contextvars.copy_context()
         fut = loop.run_in_executor(
-            None,
+            _inference_executor,
             functools.partial(ctx.run, backend.generate),
             request.prompt,
             request.max_tokens,
@@ -638,16 +673,40 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     except HTTPException:
         raise
 
-    except PromptTooLongError as exc:
+    except RequestRejectedError as exc:
         # A client error, not a service failure: counted separately so it does
         # not inflate the error-ratio SLO.
         outcome = "rejected"
         INFERENCE_REQUESTS_TOTAL.labels(status="rejected").inc()
-        logger.info(
-            "Prompt rejected: exceeds context window.",
-            extra={"tokens_prompt": exc.prompt_tokens, "n_ctx": exc.n_ctx},
+        details = (
+            {"tokens_prompt": exc.prompt_tokens, "n_ctx": exc.n_ctx}
+            if isinstance(exc, PromptTooLongError)
+            else {}
         )
+        logger.info("Request rejected.", extra={"reason": str(exc), **details})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except BackendError as exc:
+        # Upstream timeouts share the "timeout" status with local deadline
+        # overruns so the latency SLO sees both.
+        outcome = "timeout" if exc.status_code == 504 else "error"
+        INFERENCE_REQUESTS_TOTAL.labels(status=outcome).inc()
+        logger.error(
+            "Inference backend failed.",
+            extra={"reason": str(exc), "status_code": exc.status_code},
+        )
+        headers = (
+            {"Retry-After": exc.retry_after}
+            if exc.status_code == 503 and exc.retry_after
+            else None
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=_BACKEND_ERROR_DETAIL.get(
+                exc.status_code, _BACKEND_ERROR_DETAIL[502]
+            ),
+            headers=headers,
+        ) from exc
 
     except Exception as exc:
         outcome = "error"

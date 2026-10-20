@@ -8,9 +8,9 @@
 pytest==9.1.1
 pytest-cov==7.1.0
 
-# HTTP client backing starlette.testclient. Starlette 1.x prefers httpx2 and
-# emits a deprecation warning when it falls back to the legacy httpx package.
-httpx2==2.13.1
+# starlette.testclient runs on httpx2, which requirements.txt already pins for
+# the remote backends. Starlette 1.x emits a deprecation warning when it falls
+# back to the legacy httpx package, so that one must not be added here.
 
 # Used only for its response models: the suite validates /v1/completions
 # output against openai.types.Completion to guard the drop-in compatibility

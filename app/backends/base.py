@@ -19,7 +19,17 @@ class GenerationResult(TypedDict):
     tokens_completion: int
 
 
-class PromptTooLongError(ValueError):
+class RequestRejectedError(ValueError):
+    """
+    The request cannot be served as submitted; the API answers 400.
+
+    Raised for problems the client can fix by changing the request, so they
+    are counted as "rejected" and kept out of the error-ratio SLO. The
+    message is returned to the client and must not carry internal details.
+    """
+
+
+class PromptTooLongError(RequestRejectedError):
     """The prompt alone does not fit in the model's context window."""
 
     def __init__(self, prompt_tokens: int, n_ctx: int) -> None:
@@ -29,6 +39,27 @@ class PromptTooLongError(ValueError):
             f"Prompt is {prompt_tokens} tokens; the context window is {n_ctx} "
             "tokens and must also leave room for the completion."
         )
+
+
+class BackendError(RuntimeError):
+    """
+    The engine failed to produce a completion for a reason outside the client.
+
+    status_code is the HTTP status the API answers with: 502 when an upstream
+    service failed or refused the server's own credentials or configuration,
+    503 when it is temporarily overloaded, 504 when it did not answer in time.
+    The message is logged, never returned, since upstream error bodies can
+    describe account and deployment details.
+    """
+
+    def __init__(
+        self, message: str, status_code: int = 502, retry_after: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        # Upstream Retry-After value, forwarded on 503 so clients back off for
+        # as long as the provider asked rather than retrying immediately.
+        self.retry_after = retry_after
 
 
 @runtime_checkable
@@ -72,7 +103,12 @@ class InferenceBackend(Protocol):
         stop_event is set by the HTTP layer when the request is abandoned
         (deadline or client cancellation). Implementations should return as
         soon as practical once it is set; the inference permit is held until
-        they do. Raises PromptTooLongError when the prompt cannot fit in the
-        context window, which the API reports as a client error.
+        they do. Raises RequestRejectedError (for example PromptTooLongError)
+        for requests the client must change, and BackendError for failures
+        the client cannot fix.
         """
+        ...
+
+    def close(self) -> None:
+        """Releases resources at shutdown, after in-flight calls have drained."""
         ...

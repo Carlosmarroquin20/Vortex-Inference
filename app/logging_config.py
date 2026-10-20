@@ -95,6 +95,12 @@ def configure_logging(level: int = logging.INFO) -> None:
         uv_logger.handlers.clear()
         uv_logger.propagate = True
 
+    # The HTTP client used by remote backends logs every outbound request at
+    # INFO. Each one already appears in the access log and the completion
+    # log line under the same request ID, so only its warnings are kept.
+    for name in ("httpx2", "httpcore2"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 # Inbound IDs are echoed into logs and response headers, so only a bounded,
 # header-safe charset is accepted; anything else is replaced, not trusted.

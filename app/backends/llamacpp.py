@@ -71,6 +71,12 @@ class LlamaCppBackend:
         """
         return self._ready
 
+    def close(self) -> None:
+        # Nothing to release ahead of process exit: the model's memory goes
+        # with the process, and freeing it explicitly would race any worker
+        # thread that outlived the shutdown deadline.
+        pass
+
     def busy_seconds(self) -> float:
         """Seconds the current generate() call has spent in llama.cpp, or 0."""
         started = self._busy_since
