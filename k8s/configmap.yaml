@@ -52,8 +52,9 @@ data:
   OMP_NUM_THREADS: "2"
   OPENBLAS_NUM_THREADS: "2"
 
-  # Full CPU inference. Set to "-1" to offload all layers to GPU when
-  # running on a node with NVIDIA device plugin enabled.
+  # Full CPU inference. "-1" offloads all layers to the GPU, but only with an
+  # image built with a GPU backend (see the note in docker/Dockerfile) on a
+  # node running the NVIDIA device plugin; the default image ignores it.
   VORTEX_N_GPU_LAYERS: "0"
 
   # Serialized inference enforced at application layer.

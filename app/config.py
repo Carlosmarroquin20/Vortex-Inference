@@ -50,9 +50,11 @@ class Settings(BaseSettings):
     # The relationship: n_threads=2 → ~1.5–2 tok/s on modern x86 with OpenBLAS.
     n_threads: int = Field(default=2, ge=1)
 
-    # n_gpu_layers=0 enforces full CPU inference. In a GPU-enabled cluster,
-    # set to -1 to offload all layers to VRAM and gain ~10x throughput.
-    # This single flag is the only change needed to transition from CPU to GPU.
+    # Number of layers to offload to the GPU; -1 offloads all of them. It only
+    # has an effect when llama-cpp-python was compiled with a GPU backend.
+    # The image in docker/Dockerfile is built for CPU (OpenBLAS), where any
+    # value behaves like 0. Running on GPUs also requires an image built with
+    # e.g. -DGGML_CUDA=ON and a GPU resource request in the Deployment.
     n_gpu_layers: int = Field(default=0, ge=-1)
 
     # max_concurrent_requests=1 is deliberate for single-pod CPU inference.
