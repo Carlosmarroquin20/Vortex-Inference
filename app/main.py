@@ -44,13 +44,13 @@ from prometheus_client import (
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.responses import Response
 
+from app.backends import InferenceBackend, PromptTooLongError, create_backend
 from app.config import Settings
 from app.logging_config import (
     RequestContextMiddleware,
     configure_logging,
     request_id_var,
 )
-from app.models.llm_loader import LLMLoader, PromptTooLongError
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -135,7 +135,7 @@ MODEL_LOAD_DURATION_SECONDS = Gauge(
 # Application State
 # ---------------------------------------------------------------------------
 # Module-level references avoid re-initialization on each request.
-llm: LLMLoader | None = None
+backend: InferenceBackend | None = None
 
 # The semaphore is initialized during lifespan startup, not at import time,
 # because asyncio primitives must be created inside a running event loop.
@@ -153,8 +153,9 @@ async def _drain_and_release(fut: asyncio.Future, sem: asyncio.Semaphore) -> Non
     Waits for an abandoned inference thread to exit, then releases its permit.
 
     The permit must outlive the request that abandoned the thread: releasing
-    it earlier would let the next queued request enter the non-thread-safe
-    Llama object concurrently with the call that is still unwinding.
+    it earlier would let the next queued request enter the backend (for
+    llama.cpp, a non-thread-safe model) concurrently with the call that is
+    still unwinding.
     """
     try:
         await fut
@@ -179,37 +180,34 @@ def _hand_off_permit(fut: asyncio.Future, sem: asyncio.Semaphore) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
-    Manages the model lifecycle: load on startup, release on shutdown.
+    Manages the backend lifecycle: create on startup, drain on shutdown.
 
-    Fail-fast pattern: if model loading raises, the exception propagates to
+    Fail-fast pattern: if backend creation raises, the exception propagates to
     uvicorn, which exits with a non-zero code. Kubernetes interprets this as
     a CrashLoopBackOff and applies exponential backoff before restarting —
     the correct behavior when the underlying issue (missing file, corrupt
     weights, OOM) requires human intervention, not an immediate retry.
     """
-    global llm, _inference_semaphore
+    global backend, _inference_semaphore
 
     logger.info(
         "Starting inference engine initialization.",
-        extra={
-            "model_path": settings.model_path,
-            "n_ctx": settings.n_ctx,
-            "n_threads": settings.n_threads,
-            "n_gpu_layers": settings.n_gpu_layers,
-        },
+        extra={"backend": settings.backend, "model": settings.model_name},
     )
 
     load_start = time.monotonic()
     try:
-        llm = LLMLoader(settings)
+        backend = create_backend(settings)
     except Exception as exc:
         logger.critical(
-            "Model failed to load. Exiting so Kubernetes applies CrashLoopBackOff.",
+            "Inference backend failed to start. Exiting so Kubernetes applies "
+            "CrashLoopBackOff.",
             exc_info=True,
         )
         raise RuntimeError(
-            "Inference server cannot start without a valid model. "
-            "Check model_path, available memory, and file integrity."
+            f"Inference server cannot start without a working {settings.backend} "
+            "backend. For llama_cpp, check model_path, available memory, and "
+            "file integrity."
         ) from exc
 
     load_duration = time.monotonic() - load_start
@@ -234,8 +232,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Graceful shutdown. uvicorn has stopped accepting connections and waited
     # for open requests; any request it had to cancel handed its worker
     # thread to a drain task. Waiting for those threads matters because the
-    # Llama object is freed when the process tears down, and native code still
-    # running against it would crash instead of exiting cleanly.
+    # backend is torn down with the process; for llama.cpp, native code still
+    # running against a freed model would crash instead of exiting cleanly.
     # terminationGracePeriodSeconds must cover this wait plus the preStop sleep.
     pending = set(_drain_tasks)
     if pending:
@@ -404,9 +402,12 @@ def _inference_stalled() -> bool:
     inference permit, so every queued request will time out behind it and
     only a process restart recovers the pod.
     """
-    if llm is None:
+    if backend is None:
         return False
-    return llm.busy_seconds() > settings.inference_timeout_seconds + STALL_GRACE_SECONDS
+    return (
+        backend.busy_seconds()
+        > settings.inference_timeout_seconds + STALL_GRACE_SECONDS
+    )
 
 
 @app.get("/health/live", response_model=LivenessResponse, tags=["operations"])
@@ -439,7 +440,7 @@ async def readiness() -> HealthResponse:
     readiness window, well before liveness restarts it. /health is kept as
     an alias for existing clients and scripts.
     """
-    if llm is None or not llm.is_ready():
+    if backend is None or not backend.is_ready():
         raise HTTPException(
             status_code=503,
             detail="Model not loaded. Pod is not ready to serve inference traffic.",
@@ -490,7 +491,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     If an immediate 429 were returned instead, the gauge would only reflect
     active (not queued) requests, and KEDA would underestimate true demand.
     """
-    if llm is None or _inference_semaphore is None:
+    if backend is None or _inference_semaphore is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
 
     # Increment before acquiring the semaphore so queued requests contribute to
@@ -522,9 +523,9 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
 
         # asyncio.shield prevents wait_for from cancelling the executor future
         # on timeout. The thread must run to completion before the semaphore is
-        # released — the Llama object is not thread-safe, and releasing the
-        # semaphore while the thread is still inside llm.generate() would allow
-        # a second request to enter, corrupting shared C++ model state.
+        # released: releasing it while the thread is still inside
+        # backend.generate() would let another request enter, and the llama.cpp
+        # model is not thread-safe, so shared C++ state would be corrupted.
         #
         # run_in_executor does not propagate context variables to the worker
         # thread, so the call is wrapped in a copy of the current context to
@@ -532,7 +533,7 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
         ctx = contextvars.copy_context()
         fut = loop.run_in_executor(
             None,
-            functools.partial(ctx.run, llm.generate),
+            functools.partial(ctx.run, backend.generate),
             request.prompt,
             request.max_tokens,
             request.temperature,
@@ -546,9 +547,9 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
                 asyncio.shield(fut), timeout=settings.inference_timeout_seconds
             )
         except (TimeoutError, asyncio.CancelledError) as exc:
-            # Both paths leave the worker thread running inside llama.cpp.
-            # Signal it to stop at the next token boundary via the
-            # stopping_criteria callback in LLMLoader.generate(), and hand the
+            # Both paths leave the worker thread running inside the backend.
+            # Signal it to stop through stop_event (for llama.cpp, at the next
+            # token boundary via its stopping_criteria callback), and hand the
             # permit to a drain task that releases it only once the thread
             # has exited. The response (or the cancellation) proceeds
             # immediately instead of blocking on the draining thread.

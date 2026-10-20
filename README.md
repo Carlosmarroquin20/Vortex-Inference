@@ -213,8 +213,10 @@ vortex-inference/
 │   ├── main.py               # FastAPI server — lifecycle, endpoints, Prometheus metrics
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
 │   ├── logging_config.py     # logfmt formatter + request ID middleware
-│   └── models/
-│       └── llm_loader.py     # llama-cpp-python adapter — isolated from HTTP layer
+│   └── backends/
+│       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND
+│       ├── base.py           # InferenceBackend protocol shared by every engine
+│       └── llamacpp.py       # Local GGUF inference via llama-cpp-python
 ├── tests/                    # pytest suite against an in-process llama_cpp fake
 ├── docs/
 │   └── runbooks.md           # One runbook per alert, linked via runbook_url

@@ -24,6 +24,7 @@ import pytest
 from tests.fakes import FakeLlama
 
 _TEST_ENV = {
+    "VORTEX_BACKEND": "llama_cpp",
     "VORTEX_MODEL_PATH": "/models/test-model.gguf",
     "VORTEX_MODEL_NAME": "test-model",
     "VORTEX_N_CTX": "64",
@@ -56,4 +57,4 @@ def client():
 @pytest.fixture
 def fake_model(client) -> FakeLlama:
     """The FakeLlama instance owned by the running application."""
-    return main.llm._model
+    return main.backend._model

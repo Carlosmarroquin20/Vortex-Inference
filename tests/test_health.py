@@ -9,9 +9,9 @@ import app.main as main
 def stalled(fake_model):
     """Simulates a worker thread stuck in native code past the stall threshold."""
     overrun = main.settings.inference_timeout_seconds + main.STALL_GRACE_SECONDS + 1
-    main.llm._busy_since = time.monotonic() - overrun
+    main.backend._busy_since = time.monotonic() - overrun
     yield
-    main.llm._busy_since = None
+    main.backend._busy_since = None
 
 
 @pytest.mark.parametrize("path", ["/health/live", "/health/ready", "/health"])
@@ -22,12 +22,14 @@ def test_probes_pass_when_idle(client, path):
 def test_slow_inference_within_deadline_is_not_a_failure(client, fake_model):
     # A long-running request is load, not a fault: restarting or unrouting
     # the pod would discard queued work. KEDA handles it by scaling out.
-    main.llm._busy_since = time.monotonic() - main.settings.inference_timeout_seconds
+    main.backend._busy_since = (
+        time.monotonic() - main.settings.inference_timeout_seconds
+    )
     try:
         assert client.get("/health/live").status_code == 200
         assert client.get("/health/ready").status_code == 200
     finally:
-        main.llm._busy_since = None
+        main.backend._busy_since = None
 
 
 @pytest.mark.parametrize("path", ["/health/live", "/health/ready", "/health"])
@@ -37,10 +39,10 @@ def test_stalled_worker_fails_all_probes(client, stalled, path):
 
 def test_probes_recover_once_the_worker_exits(client, fake_model):
     overrun = main.settings.inference_timeout_seconds + main.STALL_GRACE_SECONDS + 1
-    main.llm._busy_since = time.monotonic() - overrun
+    main.backend._busy_since = time.monotonic() - overrun
     assert client.get("/health/live").status_code == 503
 
-    main.llm._busy_since = None
+    main.backend._busy_since = None
 
     assert client.get("/health/live").status_code == 200
 
@@ -50,4 +52,4 @@ def test_busy_time_is_tracked_during_generation(client, fake_model):
     client.post("/v1/completions", json={"prompt": "hello"})
 
     # Cleared once the call returns, so an idle pod never looks stalled.
-    assert main.llm.busy_seconds() == 0.0
+    assert main.backend.busy_seconds() == 0.0

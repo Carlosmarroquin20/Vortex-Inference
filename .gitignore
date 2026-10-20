@@ -14,7 +14,7 @@
 # or the provided download script for reproducible model provisioning.
 #
 # /models/ (leading slash) anchors the rule to the repo root, preventing it
-# from accidentally matching app/models/ or any other subdirectory named "models".
+# from accidentally matching a subdirectory named "models" in application code.
 # =============================================================================
 /models/
 *.gguf

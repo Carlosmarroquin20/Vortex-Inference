@@ -1,7 +1,7 @@
 """
 In-process stand-in for llama_cpp.Llama.
 
-Implements only the surface LLMLoader uses (construction, tokenize, and the
+Implements only the surface LlamaCppBackend uses (construction, tokenize, and the
 completion call with stopping_criteria), plus instrumentation the tests rely
 on: a record of calls, a high-water mark of concurrent calls to detect
 thread-safety violations, and knobs to make generation slow or failing.

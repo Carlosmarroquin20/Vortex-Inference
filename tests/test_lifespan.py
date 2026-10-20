@@ -5,19 +5,21 @@ import pytest
 import app.main as main
 
 
-def test_startup_fails_fast_when_the_model_cannot_load(monkeypatch):
-    # The process must exit rather than serve without a model, so Kubernetes
+def test_startup_fails_fast_when_the_backend_cannot_start(monkeypatch):
+    # The process must exit rather than serve without a backend, so Kubernetes
     # applies CrashLoopBackOff instead of routing traffic to a broken pod.
-    def failing_loader(settings):
+    def failing_factory(settings):
         raise MemoryError("cannot allocate KV cache")
 
-    monkeypatch.setattr(main, "LLMLoader", failing_loader)
+    monkeypatch.setattr(main, "create_backend", failing_factory)
 
     async def start():
         async with main.lifespan(main.app):
             pass
 
-    with pytest.raises(RuntimeError, match="cannot start without a valid model"):
+    with pytest.raises(
+        RuntimeError, match="cannot start without a working llama_cpp backend"
+    ):
         asyncio.run(start())
 
 

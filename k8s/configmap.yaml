@@ -16,6 +16,11 @@ metadata:
     app.kubernetes.io/name: vortex-inference
     app.kubernetes.io/component: config
 data:
+  # Inference engine (app/backends). llama_cpp runs the GGUF model below
+  # in-process; the resource limits and thread caps in this directory are
+  # sized for it.
+  VORTEX_BACKEND: "llama_cpp"
+
   # Path inside the container where the PVC is mounted.
   # Changing this value requires a matching update to the volumeMounts
   # section in deployment.yaml — they are intentionally not coupled

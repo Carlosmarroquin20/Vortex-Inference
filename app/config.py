@@ -7,6 +7,8 @@ promoted across environments (dev → staging → prod) by changing only the
 ConfigMap or Secret — not the image layer. No hardcoded paths or magic numbers.
 """
 
+from typing import Literal
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,6 +27,12 @@ class Settings(BaseSettings):
       2. .env file (local development only, never committed)
       3. Defaults defined here (safe fallbacks for resource-constrained environments)
     """
+
+    # --- Backend Selection ---
+    # Engine that produces completions; see app/backends. Only the in-process
+    # llama.cpp backend exists today. The Literal makes an unknown name a
+    # startup validation error rather than a failure on the first request.
+    backend: Literal["llama_cpp"] = "llama_cpp"
 
     # --- Model Configuration ---
     model_path: str = "/models/phi-3-mini-4k-instruct-q4_k_m.gguf"

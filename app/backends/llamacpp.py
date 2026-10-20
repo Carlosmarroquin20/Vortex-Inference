@@ -1,11 +1,9 @@
 """
-LLM lifecycle wrapper for llama-cpp-python.
+Local GGUF inference through llama-cpp-python.
 
-Isolation rationale: separating model I/O from the HTTP layer allows the
-inference logic to be tested independently and swapped (e.g., switching from
-llama-cpp-python to ctransformers or a remote vLLM endpoint) without touching
-the API surface or the metrics instrumentation. This is the adapter pattern
-applied to the ML inference layer.
+The model runs in-process on the pod's CPUs (or GPU, in an image built with
+a GPU backend), which is what the resource limits, thread caps and
+single-permit concurrency in the deployment are sized for.
 """
 
 import logging
@@ -14,24 +12,13 @@ import time
 
 from llama_cpp import Llama
 
+from app.backends.base import GenerationResult, PromptTooLongError
 from app.config import Settings
 
-logger = logging.getLogger("vortex.llm_loader")
+logger = logging.getLogger("vortex.backends.llamacpp")
 
 
-class PromptTooLongError(ValueError):
-    """The prompt alone does not fit in the model's context window."""
-
-    def __init__(self, prompt_tokens: int, n_ctx: int) -> None:
-        self.prompt_tokens = prompt_tokens
-        self.n_ctx = n_ctx
-        super().__init__(
-            f"Prompt is {prompt_tokens} tokens; the context window is {n_ctx} "
-            "tokens and must also leave room for the completion."
-        )
-
-
-class LLMLoader:
+class LlamaCppBackend:
     """
     Stateful wrapper around a llama.cpp model instance.
 
@@ -51,7 +38,12 @@ class LLMLoader:
 
         logger.info(
             "Loading GGUF model from disk.",
-            extra={"model_path": settings.model_path},
+            extra={
+                "model_path": settings.model_path,
+                "n_ctx": settings.n_ctx,
+                "n_threads": settings.n_threads,
+                "n_gpu_layers": settings.n_gpu_layers,
+            },
         )
 
         # verbose=False suppresses llama.cpp's per-token C++ stderr output.
@@ -92,7 +84,7 @@ class LLMLoader:
         top_p: float,
         stop: list[str] | None,
         stop_event: threading.Event | None = None,
-    ) -> dict:
+    ) -> GenerationResult:
         """
         Synchronous inference call. Designed to be run in a ThreadPoolExecutor
         from the async event loop in main.py to avoid blocking the I/O thread.

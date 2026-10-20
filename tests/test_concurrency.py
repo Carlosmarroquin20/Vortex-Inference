@@ -22,7 +22,7 @@ def _run_with_app(scenario):
 
     async def runner():
         async with main.lifespan(main.app):
-            return await scenario(main.llm._model)
+            return await scenario(main.backend._model)
 
     return asyncio.run(runner())
 

@@ -4,7 +4,7 @@
 #
 # Patterns are anchored to the context root, so recursive matches need an
 # explicit **/ prefix. Root-only entries such as models/ intentionally do
-# not match app/models/, which contains application code.
+# not match a nested directory of the same name inside application code.
 
 # Exclude model files — they are mounted at runtime via PersistentVolumeClaim.
 # Including them in the build context would cause multi-GB docker build payloads
