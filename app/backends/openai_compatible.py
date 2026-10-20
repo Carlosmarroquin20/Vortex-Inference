@@ -8,26 +8,16 @@ I/O-bound: a pod can serve many requests at once by raising
 max_concurrent_requests, which the in-process backend cannot do.
 """
 
-import itertools
 import logging
 import threading
-import time
 
 import httpx2
 
-from app.backends.base import BackendError, GenerationResult, RequestRejectedError
+from app.backends.base import BackendError, GenerationResult
+from app.backends.upstream import MAX_ERROR_MESSAGE, InflightTracker, status_error
 from app.config import Settings
 
 logger = logging.getLogger("vortex.backends.openai_compatible")
-
-# Upstream statuses that describe the request content (an oversized prompt,
-# a moderation refusal, an out-of-range parameter). They are forwarded as 400
-# so the client can act on them; every other failure is the server's problem.
-_REJECTION_STATUSES = frozenset({400, 413, 422})
-_TIMEOUT_STATUSES = frozenset({408, 504})
-
-# Upper bound on the upstream error text forwarded to clients or logged.
-_MAX_ERROR_MESSAGE = 300
 
 
 def _error_message(response: httpx2.Response) -> str:
@@ -35,15 +25,15 @@ def _error_message(response: httpx2.Response) -> str:
     try:
         payload = response.json()
     except ValueError:
-        return response.text[:_MAX_ERROR_MESSAGE]
+        return response.text
 
     # OpenAI and vLLM: {"error": {"message": ...}}; Ollama: {"error": "..."}.
     error = payload.get("error") if isinstance(payload, dict) else None
     if isinstance(error, dict) and isinstance(error.get("message"), str):
-        return error["message"][:_MAX_ERROR_MESSAGE]
+        return error["message"]
     if isinstance(error, str):
-        return error[:_MAX_ERROR_MESSAGE]
-    return response.text[:_MAX_ERROR_MESSAGE]
+        return error
+    return response.text
 
 
 class OpenAICompatibleBackend:
@@ -63,6 +53,7 @@ class OpenAICompatibleBackend:
         self._model = settings.model_name
         self._api_style = settings.remote_api_style
         self._max_tokens_field = settings.remote_max_tokens_field
+        self._forward_sampling = settings.remote_forward_sampling
 
         headers = {}
         if settings.remote_api_key is not None:
@@ -92,9 +83,7 @@ class OpenAICompatibleBackend:
             transport=transport,
         )
 
-        self._lock = threading.Lock()
-        self._inflight: dict[int, float] = {}
-        self._call_ids = itertools.count()
+        self._inflight = InflightTracker()
 
         logger.info(
             "Using OpenAI-compatible backend.",
@@ -119,9 +108,7 @@ class OpenAICompatibleBackend:
 
     def busy_seconds(self) -> float:
         """Age of the oldest request currently waiting on the upstream API."""
-        with self._lock:
-            oldest = min(self._inflight.values(), default=None)
-        return time.monotonic() - oldest if oldest is not None else 0.0
+        return self._inflight.oldest_age()
 
     def close(self) -> None:
         self._client.close()
@@ -150,9 +137,10 @@ class OpenAICompatibleBackend:
         body: dict[str, object] = {
             "model": self._model,
             self._max_tokens_field: max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
         }
+        if self._forward_sampling:
+            body["temperature"] = temperature
+            body["top_p"] = top_p
         if stop:
             body["stop"] = stop
 
@@ -163,11 +151,9 @@ class OpenAICompatibleBackend:
             path = "/completions"
             body["prompt"] = prompt
 
-        call_id = next(self._call_ids)
-        with self._lock:
-            self._inflight[call_id] = time.monotonic()
         try:
-            response = self._client.post(path, json=body)
+            with self._inflight.track():
+                response = self._client.post(path, json=body)
         except httpx2.TimeoutException as exc:
             raise BackendError(
                 f"Upstream did not respond in time: {exc!r}", status_code=504
@@ -175,44 +161,14 @@ class OpenAICompatibleBackend:
         except httpx2.TransportError as exc:
             # Connection refused, DNS failure, TLS error, reset mid-response.
             raise BackendError(f"Upstream unreachable: {exc!r}") from exc
-        finally:
-            with self._lock:
-                del self._inflight[call_id]
 
-        self._raise_for_status(response)
-        return self._parse(response)
-
-    def _raise_for_status(self, response: httpx2.Response) -> None:
-        status = response.status_code
-        if response.is_success:
-            return
-
-        message = _error_message(response)
-        if status in _REJECTION_STATUSES:
-            # Logged at WARNING because a server-side misconfiguration, such
-            # as a parameter the model does not accept, produces the same
-            # status for every request and would otherwise only show up as a
-            # rise in "rejected" requests.
-            logger.warning(
-                "Upstream rejected the request.",
-                extra={"upstream_status": status, "upstream_message": message},
-            )
-            raise RequestRejectedError(
-                f"The model provider rejected the request: {message}"
-            )
-        if status == 429:
-            raise BackendError(
-                f"Upstream rate limit (HTTP 429): {message}",
-                status_code=503,
+        if not response.is_success:
+            raise status_error(
+                response.status_code,
+                _error_message(response),
                 retry_after=response.headers.get("retry-after"),
             )
-        if status in _TIMEOUT_STATUSES:
-            raise BackendError(
-                f"Upstream timed out (HTTP {status}): {message}", status_code=504
-            )
-        # 401/403/404 land here too: a wrong key or model name is the
-        # operator's to fix, not the client's.
-        raise BackendError(f"Upstream returned HTTP {status}: {message}")
+        return self._parse(response)
 
     def _parse(self, response: httpx2.Response) -> GenerationResult:
         try:
@@ -238,5 +194,5 @@ class OpenAICompatibleBackend:
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise BackendError(
                 "Upstream response is not a valid completion: "
-                f"{response.text[:_MAX_ERROR_MESSAGE]!r}"
+                f"{response.text[:MAX_ERROR_MESSAGE]!r}"
             ) from exc

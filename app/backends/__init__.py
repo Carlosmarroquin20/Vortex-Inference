@@ -38,6 +38,11 @@ def create_backend(settings: Settings) -> InferenceBackend:
 
         return OpenAICompatibleBackend(settings)
 
+    if settings.backend == "anthropic":
+        from app.backends.anthropic_api import AnthropicBackend
+
+        return AnthropicBackend(settings)
+
     # Unreachable while Settings validates the name; kept so that adding a
     # value to the Literal without a branch here fails loudly at startup.
     raise ValueError(f"Unsupported inference backend: {settings.backend!r}")

@@ -64,6 +64,7 @@ def remote_settings(**overrides) -> Settings:
         "backend": "openai_compatible",
         "remote_base_url": BASE_URL,
         "remote_api_key": "upstream-key",
+        "model_name": "test-model",
         **overrides,
     }
     return Settings(**values)
@@ -160,6 +161,15 @@ def test_max_tokens_field_name_is_configurable(client, upstream, use_remote):
 
     assert upstream.last_body["max_completion_tokens"] == 9
     assert "max_tokens" not in upstream.last_body
+
+
+def test_sampling_parameters_can_be_withheld(client, upstream, use_remote):
+    use_remote(remote_forward_sampling=False)
+
+    client.post("/v1/completions", json={"prompt": "hello", "temperature": 0.2})
+
+    assert "temperature" not in upstream.last_body
+    assert "top_p" not in upstream.last_body
 
 
 def test_optional_fields_are_omitted(client, upstream, use_remote):
@@ -413,7 +423,7 @@ def test_remote_requests_run_concurrently_up_to_the_configured_limit(
 def test_remote_backend_requires_a_base_url_setting(monkeypatch):
     monkeypatch.setenv("VORTEX_BACKEND", "openai_compatible")
 
-    with pytest.raises(ValidationError, match="VORTEX_REMOTE_BASE_URL is required"):
+    with pytest.raises(ValidationError, match="VORTEX_REMOTE_BASE_URL must be set"):
         Settings()
 
 

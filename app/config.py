@@ -36,11 +36,14 @@ class Settings(BaseSettings):
     #   openai_compatible:  an HTTP API that implements OpenAI's
     #                       /chat/completions or /completions (OpenAI, vLLM,
     #                       Ollama, LM Studio, OpenRouter, ...).
-    backend: Literal["llama_cpp", "openai_compatible"] = "llama_cpp"
+    #   anthropic:          Claude models through Anthropic's Messages API.
+    backend: Literal["llama_cpp", "openai_compatible", "anthropic"] = "llama_cpp"
 
     # --- Model Configuration ---
     # model_name is reported in responses and, for remote backends, is the
     # model identifier sent upstream, so it must match the provider's name.
+    # Remote backends require it to be set explicitly: the default names a
+    # local GGUF model that no provider serves.
     model_path: str = "/models/phi-3-mini-4k-instruct-q4_k_m.gguf"
     model_name: str = "phi-3-mini-4k-instruct"
 
@@ -71,15 +74,17 @@ class Settings(BaseSettings):
     max_concurrent_requests: int = Field(default=1, ge=1)
 
     # --- Remote Backend Configuration ---
-    # Base URL including the API version prefix, e.g. https://api.openai.com/v1
-    # or http://vllm.inference.svc:8000/v1. Required for remote backends and
-    # deliberately without a default, so a misconfigured deployment fails at
+    # Base URL of the upstream API. openai_compatible requires it, including
+    # the version prefix (https://api.openai.com/v1, http://vllm:8000/v1), and
+    # has deliberately no default, so a misconfigured deployment fails at
     # startup instead of sending prompts to a provider nobody chose.
+    # anthropic defaults to https://api.anthropic.com (no version prefix).
     remote_base_url: str | None = None
 
-    # Sent as a bearer token. Optional because self-hosted servers such as
-    # Ollama or a private vLLM often run without one. Distinct from api_key,
-    # which authenticates clients of this server.
+    # Credential for the upstream API. Distinct from api_key, which
+    # authenticates clients of this server. Optional for openai_compatible,
+    # since self-hosted servers such as Ollama often run without one;
+    # required for anthropic.
     remote_api_key: SecretStr | None = None
 
     # chat sends the prompt as a single user message to /chat/completions,
@@ -98,6 +103,28 @@ class Settings(BaseSettings):
     # from inference_timeout_seconds, which bounds the whole generation, so
     # an unreachable provider fails fast instead of holding a permit.
     remote_connect_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    # Whether openai_compatible sends temperature and top_p upstream. Most
+    # compatible servers honour them; OpenAI's reasoning models reject
+    # non-default values, so disable it for those. The anthropic backend never
+    # sends them: current Claude models reject them and the SDK no longer
+    # exposes them.
+    remote_forward_sampling: bool = True
+
+    # --- Anthropic Backend ---
+    # output_config.effort, which sets how much the model thinks. Unset leaves
+    # the model's default. Thinking tokens count against the request's
+    # max_tokens, so short completions on models that always think may come
+    # back truncated or empty unless effort is lowered; "low" suits most
+    # completion traffic. Older models such as Haiku 4.5 reject the field.
+    anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+    # Server-side refusal fallback ("default" mode): when the model's safety
+    # classifiers decline a request, the API re-runs it on the model Anthropic
+    # recommends for that refusal category within the same call. Supported on
+    # the first-party API for current Opus, Sonnet and Fable models; disable
+    # for models or gateways that reject the parameter.
+    anthropic_refusal_fallback: bool = True
 
     # --- Server Configuration ---
     port: int = Field(default=8080, ge=1, le=65535)
@@ -119,7 +146,13 @@ class Settings(BaseSettings):
     # anyone who can reach the service. Enable explicitly for local work.
     enable_docs: bool = False
 
-    @field_validator("api_key", "remote_api_key", "remote_base_url", mode="before")
+    @field_validator(
+        "api_key",
+        "remote_api_key",
+        "remote_base_url",
+        "anthropic_effort",
+        mode="before",
+    )
     @classmethod
     def blank_means_unset(cls, v: object) -> object:
         # An empty VORTEX_API_KEY= line in .env should mean "no auth", not
@@ -142,10 +175,20 @@ class Settings(BaseSettings):
         return v.rstrip("/")
 
     @model_validator(mode="after")
-    def remote_backend_requires_base_url(self) -> "Settings":
-        if self.backend != "llama_cpp" and self.remote_base_url is None:
+    def remote_backend_requirements(self) -> "Settings":
+        if self.backend == "llama_cpp":
+            return self
+
+        missing = []
+        if "model_name" not in self.model_fields_set:
+            missing.append("VORTEX_MODEL_NAME")
+        if self.backend == "openai_compatible" and self.remote_base_url is None:
+            missing.append("VORTEX_REMOTE_BASE_URL")
+        if self.backend == "anthropic" and self.remote_api_key is None:
+            missing.append("VORTEX_REMOTE_API_KEY")
+        if missing:
             raise ValueError(
-                f"VORTEX_REMOTE_BASE_URL is required when VORTEX_BACKEND is "
+                f"{', '.join(missing)} must be set when VORTEX_BACKEND is "
                 f"{self.backend!r}."
             )
         return self

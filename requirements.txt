@@ -29,3 +29,7 @@ prometheus-client==0.26.0
 # httpx2 rather than httpx: it is the client Starlette 1.x and the OpenAI SDK
 # build on, so the image and the test suite share one HTTP stack.
 httpx2==2.13.1
+
+# Official SDK for the anthropic backend (app/backends/anthropic_api.py). The
+# 1.x line runs on httpx2, so it shares the client pinned above.
+anthropic==1.13.0

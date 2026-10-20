@@ -158,6 +158,7 @@ metrics, probes and autoscaling signal are the same for every backend.
 |---|---|---|
 | `llama_cpp` (default) | Any GGUF model, run in-process on the pod's CPUs | `VORTEX_MODEL_PATH` (file on the PVC) |
 | `openai_compatible` | OpenAI, or a model served elsewhere by vLLM, Ollama, LM Studio, `llama-server` or a router such as OpenRouter | `VORTEX_MODEL_NAME` (the upstream model ID) |
+| `anthropic` | Claude models through Anthropic's Messages API | `VORTEX_MODEL_NAME` (e.g. `claude-opus-5-5`) |
 
 **Another local model.** Any GGUF file works without code changes: download it
 with `HF_REPO=... HF_FILENAME=... HF_REVISION=... MODEL_SHA256=... MODEL_SIZE=...
@@ -180,7 +181,38 @@ VORTEX_MAX_CONCURRENT_REQUESTS=16                  # generation is upstream, not
   the model's chat template is applied upstream. `completions` forwards the raw
   prompt to `/completions`, for base models on self-hosted servers.
 - OpenAI reasoning models need `VORTEX_REMOTE_MAX_TOKENS_FIELD=max_completion_tokens`
-  and may reject non-default `temperature`/`top_p`.
+  and `VORTEX_REMOTE_FORWARD_SAMPLING=false`, since they reject non-default
+  `temperature`/`top_p`.
+
+**Claude models.** The `anthropic` backend calls the Messages API through the
+official SDK:
+
+```bash
+VORTEX_BACKEND=anthropic
+VORTEX_REMOTE_API_KEY=sk-ant-...
+VORTEX_MODEL_NAME=claude-opus-5-5
+VORTEX_ANTHROPIC_EFFORT=low            # optional; see below
+VORTEX_MAX_CONCURRENT_REQUESTS=16
+```
+
+- The prompt is sent as a single user turn. `temperature` and `top_p` are
+  accepted by the API but not forwarded: current Claude models reject them.
+- Current models think before answering, and thinking tokens count against the
+  request's `max_tokens`. With small `max_tokens` values a completion can come
+  back truncated (`finish_reason: "length"`) or empty; `VORTEX_ANTHROPIC_EFFORT=low`
+  keeps thinking short for typical completion traffic.
+- Server-side refusal fallback is on (`VORTEX_ANTHROPIC_REFUSAL_FALLBACK=true`):
+  if the model's safety classifiers decline a request, the API re-runs it on
+  Anthropic's recommended fallback model within the same call. A request that
+  is still declined returns 200 with empty text and `finish_reason: "content_filter"`.
+  Turn it off for models or gateways that reject the parameter.
+- The SDK's automatic retries are disabled so a request never outlives its
+  deadline; Anthropic's 529 (overloaded) is returned as 503 with `Retry-After`,
+  like a 429. `ANTHROPIC_*` environment variables are ignored: the endpoint and
+  key always come from the `VORTEX_*` settings.
+
+**Behaviour shared by the remote backends:**
+
 - Upstream 400/413/422 responses are returned to the client as 400 with the
   provider's message and counted as `rejected`. Other upstream failures become
   502 (503 with `Retry-After` on rate limiting, 504 on timeouts) without
@@ -262,7 +294,9 @@ vortex-inference/
 │       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND
 │       ├── base.py           # InferenceBackend protocol shared by every engine
 │       ├── llamacpp.py       # Local GGUF inference via llama-cpp-python
-│       └── openai_compatible.py # Remote inference over an OpenAI-compatible API
+│       ├── openai_compatible.py # Remote inference over an OpenAI-compatible API
+│       ├── anthropic_api.py  # Claude models via the Anthropic SDK
+│       └── upstream.py       # Status mapping shared by the remote backends
 ├── tests/                    # pytest suite against an in-process llama_cpp fake
 ├── docs/
 │   └── runbooks.md           # One runbook per alert, linked via runbook_url
