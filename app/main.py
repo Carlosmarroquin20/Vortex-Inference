@@ -37,24 +37,18 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Protocol
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    Counter,
-    Gauge,
-    Histogram,
-    generate_latest,
-)
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from app.backends import (
     BackendError,
+    GenerationResult,
     InferenceBackend,
     PromptTooLongError,
     RequestRejectedError,
@@ -69,6 +63,25 @@ from app.logging_config import (
     configure_logging,
     request_id_var,
 )
+from app.metrics import (
+    INFERENCE_ACTIVE_REQUESTS,
+    INFERENCE_DURATION_SECONDS,
+    INFERENCE_REQUESTS_TOTAL,
+    MODEL_LOAD_DURATION_SECONDS,
+    QUEUE_WAIT_SECONDS,
+    TIME_TO_FIRST_TOKEN_SECONDS,
+    TOKENS_GENERATED_TOTAL,
+    TOKENS_PER_SECOND,
+)
+from app.schemas import (
+    CompletionChoice,
+    CompletionPerformance,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionUsage,
+    HealthResponse,
+    LivenessResponse,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -82,83 +95,6 @@ logger = logging.getLogger("vortex.inference")
 # Settings (resolved from environment / ConfigMap at process startup)
 # ---------------------------------------------------------------------------
 settings = Settings()
-
-# ---------------------------------------------------------------------------
-# Prometheus Metrics
-# ---------------------------------------------------------------------------
-# Naming convention: <project>_<subsystem>_<unit>_<suffix>
-# Namespace "vortex_inference" prevents label collisions in shared Prometheus
-# instances where multiple services expose identically-named metrics.
-
-INFERENCE_REQUESTS_TOTAL = Counter(
-    "vortex_inference_requests_total",
-    "Total inference requests, partitioned by terminal status.",
-    ["status"],  # "success" | "error" | "timeout" | "cancelled" | "rejected"
-)
-
-INFERENCE_DURATION_SECONDS = Histogram(
-    "vortex_inference_duration_seconds",
-    "Time spent in the inference engine, from acquiring the inference permit "
-    "until the request finished, partitioned by terminal status. Queue wait "
-    "is excluded (see vortex_inference_queue_wait_seconds). Timeouts are "
-    "recorded too: omitting them would hide the slowest requests from the "
-    "latency SLO exactly when it is being breached. Buckets are calibrated "
-    "for interactive LLM workloads; the sub-100ms range is intentionally "
-    "sparse because CPU inference cannot achieve it.",
-    ["status"],  # same values as vortex_inference_requests_total
-    buckets=[0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
-)
-
-QUEUE_WAIT_SECONDS = Histogram(
-    "vortex_inference_queue_wait_seconds",
-    "Time a request waited for the inference permit before starting. "
-    "Sustained growth here with flat inference duration means the pod is "
-    "saturated and KEDA should be adding replicas.",
-    buckets=[0.01, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
-)
-
-TIME_TO_FIRST_TOKEN_SECONDS = Histogram(
-    "vortex_inference_time_to_first_token_seconds",
-    "Streamed requests only: time from acquiring the inference permit to the "
-    "first text chunk. Queue wait is excluded, as in "
-    "vortex_inference_duration_seconds; the delay a client sees before the "
-    "first token is the sum of both. For local models it is dominated by "
-    "prompt processing, for remote backends by the network and the "
-    "provider's own queueing and thinking.",
-    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, float("inf")],
-)
-
-TOKENS_GENERATED_TOTAL = Counter(
-    "vortex_inference_tokens_generated_total",
-    "Cumulative token count by type. Use rate() over a time window for TPS "
-    "rather than reading this counter directly — it prevents misleading spikes "
-    "from appearing as sustained throughput in dashboards.",
-    ["type"],  # "prompt" | "completion"
-)
-
-INFERENCE_ACTIVE_REQUESTS = Gauge(
-    "vortex_inference_active_requests",
-    "Requests currently held by the inference engine (including queue wait). "
-    "THIS IS THE KEDA SCALING SIGNAL. The ScaledObject queries "
-    "sum(vortex_inference_active_requests) and divides by the configured "
-    "threshold to determine target replica count. A sustained value above "
-    "threshold triggers a scale-out event; dropping to zero starts the "
-    "cooldown period before scale-in.",
-)
-
-TOKENS_PER_SECOND = Gauge(
-    "vortex_inference_tokens_per_second",
-    "Throughput of the most recently completed request. This is a trailing "
-    "point-in-time indicator. For capacity planning, prefer "
-    "rate(vortex_inference_tokens_generated_total[5m]) instead.",
-)
-
-MODEL_LOAD_DURATION_SECONDS = Gauge(
-    "vortex_model_load_duration_seconds",
-    "Wall-clock time to load the model at pod startup. Elevated values indicate "
-    "memory contention during init — a risk factor in pod restart storms where "
-    "multiple replicas start simultaneously on a memory-constrained node.",
-)
 
 # ---------------------------------------------------------------------------
 # Application State
@@ -365,93 +301,6 @@ async def require_api_key(
 
 
 # ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
-class StreamOptions(BaseModel):
-    # Sends one extra chunk before [DONE] with usage and no choices.
-    include_usage: bool = False
-
-    model_config = {"extra": "forbid"}
-
-
-class CompletionRequest(BaseModel):
-    # Accepted because the OpenAI SDKs always send it. The server hosts a
-    # single model, so the value is not used for routing.
-    model: str | None = Field(default=None, max_length=256)
-    prompt: str = Field(..., min_length=1, max_length=32768)
-    max_tokens: int = Field(default=256, ge=1, le=2048)
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    # Each stop sequence is matched against the generated text after every
-    # token, so both count and length are bounded. Empty strings are rejected:
-    # they match immediately and would end generation before the first token.
-    stop: (
-        list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
-    ) = Field(default=None, max_length=4)
-    # stream=true answers with server-sent events in OpenAI's chunk format.
-    stream: bool = False
-    stream_options: StreamOptions | None = None
-
-    model_config = {"extra": "forbid"}
-    # extra="forbid" prevents prompt injection via undocumented parameters
-    # that could be processed by future versions of the model loader.
-
-    @model_validator(mode="after")
-    def stream_options_require_stream(self) -> "CompletionRequest":
-        # Matches OpenAI, which rejects stream_options on a buffered request
-        # instead of silently ignoring it.
-        if self.stream_options is not None and not self.stream:
-            raise ValueError("stream_options is only allowed when stream is true.")
-        return self
-
-
-class CompletionChoice(BaseModel):
-    index: int
-    text: str
-    logprobs: None = None
-    finish_reason: str | None  # "stop" = stop sequence/EOS; "length" = max_tokens
-
-
-class CompletionUsage(BaseModel):
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-
-
-class CompletionPerformance(BaseModel):
-    tokens_per_second: float
-    duration_seconds: float
-
-
-class CompletionResponse(BaseModel):
-    """
-    Mirrors OpenAI's text_completion object so the official SDKs and other
-    OpenAI-compatible clients parse responses natively. `performance` is a
-    server-specific extension; those clients ignore unknown fields.
-    """
-
-    id: str
-    object: Literal["text_completion"] = "text_completion"
-    created: int
-    model: str
-    choices: list[CompletionChoice]
-    usage: CompletionUsage
-    performance: CompletionPerformance
-
-
-class HealthResponse(BaseModel):
-    # Reports the logical model name only. The on-disk path is an internal
-    # deployment detail and this endpoint is unauthenticated by design.
-    status: str
-    model_loaded: bool
-    model: str
-
-
-class LivenessResponse(BaseModel):
-    status: str
-
-
-# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 # Margin past the inference deadline before a still-running worker thread is
@@ -625,25 +474,96 @@ async def create_completion(
     request: CompletionRequest,
 ) -> CompletionResponse | StreamingResponse:
     """
-    Primary inference endpoint. Path mirrors the OpenAI API for drop-in
-    client compatibility without requiring SDK changes.
-
-    Backpressure strategy: requests block on the semaphore rather than
-    immediately receiving a 429. This is intentional. KEDA reads the
-    INFERENCE_ACTIVE_REQUESTS gauge, which counts requests in the semaphore
-    queue AND requests being actively processed. A queuing model inflates the
-    gauge under load, giving KEDA a stronger signal to trigger scale-out
-    before the queue depth causes user-visible timeouts.
-
-    If an immediate 429 were returned instead, the gauge would only reflect
-    active (not queued) requests, and KEDA would underestimate true demand.
+    Text completion, buffered or streamed. Path and schema mirror the OpenAI
+    API for drop-in client compatibility without requiring SDK changes.
     """
+    _require_engine()
+    generation = _Generation(
+        prompt=request.prompt,
+        max_tokens=request.max_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        stop=request.stop,
+    )
+    completion_id = f"cmpl-{_request_id()}"
+
+    if request.stream:
+        return await _run_streamed(
+            generation,
+            _CompletionChunks(completion_id, settings.model_name),
+            include_usage=bool(
+                request.stream_options and request.stream_options.include_usage
+            ),
+        )
+
+    done = await _run_buffered(generation)
+    result = done.result
+    return CompletionResponse(
+        id=completion_id,
+        created=int(time.time()),
+        model=settings.model_name,
+        choices=[
+            CompletionChoice(
+                index=0,
+                text=result["text"],
+                finish_reason=result["finish_reason"],
+            )
+        ],
+        usage=CompletionUsage(
+            prompt_tokens=result["tokens_prompt"],
+            completion_tokens=result["tokens_completion"],
+            total_tokens=result["tokens_prompt"] + result["tokens_completion"],
+        ),
+        performance=CompletionPerformance(
+            tokens_per_second=round(done.tokens_per_second, 3),
+            duration_seconds=round(done.duration, 3),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Running a generation
+# ---------------------------------------------------------------------------
+# Backpressure strategy, for both paths below: requests block on the semaphore
+# rather than immediately receiving a 429. KEDA reads the
+# INFERENCE_ACTIVE_REQUESTS gauge, which counts requests in the semaphore
+# queue AND requests being actively processed. A queuing model inflates the
+# gauge under load, giving KEDA a stronger signal to trigger scale-out before
+# the queue depth causes user-visible timeouts. With an immediate 429 the
+# gauge would only reflect active requests, and KEDA would underestimate
+# true demand.
+
+
+@dataclass(frozen=True, slots=True)
+class _Generation:
+    """What a request asks the backend for, independent of its endpoint."""
+
+    prompt: str
+    max_tokens: int
+    temperature: float
+    top_p: float
+    stop: list[str] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Finished:
+    result: GenerationResult
+    duration: float
+    tokens_per_second: float
+
+
+def _require_engine() -> None:
     if backend is None or _inference_semaphore is None or _inference_executor is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
 
-    if request.stream:
-        return await _stream_completion(request)
 
+def _request_id() -> str:
+    # Reusing the request ID makes a completion traceable to its log lines.
+    return request_id_var.get() or uuid.uuid4().hex
+
+
+async def _run_buffered(generation: _Generation) -> _Finished:
+    """Runs a generation to completion; failures raise HTTPException."""
     # Increment before acquiring the semaphore so queued requests contribute to
     # the KEDA scaling signal. Do NOT move this inside the semaphore.
     INFERENCE_ACTIVE_REQUESTS.inc()
@@ -684,11 +604,11 @@ async def create_completion(
         fut = loop.run_in_executor(
             _inference_executor,
             functools.partial(ctx.run, backend.generate),
-            request.prompt,
-            request.max_tokens,
-            request.temperature,
-            request.top_p,
-            request.stop,
+            generation.prompt,
+            generation.max_tokens,
+            generation.temperature,
+            generation.top_p,
+            generation.stop,
             stop_event,
         )
 
@@ -727,7 +647,7 @@ async def create_completion(
                 "Inference exceeded its deadline. Worker thread signalled to stop.",
                 extra={
                     "timeout_seconds": settings.inference_timeout_seconds,
-                    "max_tokens": request.max_tokens,
+                    "max_tokens": generation.max_tokens,
                 },
             )
             raise HTTPException(status_code=504, detail=_timeout_detail()) from exc
@@ -749,30 +669,7 @@ async def create_completion(
                 "finish_reason": result["finish_reason"],
             },
         )
-
-        # Reusing the request ID makes a completion traceable to its log lines.
-        completion_id = request_id_var.get() or uuid.uuid4().hex
-        return CompletionResponse(
-            id=f"cmpl-{completion_id}",
-            created=int(time.time()),
-            model=settings.model_name,
-            choices=[
-                CompletionChoice(
-                    index=0,
-                    text=result["text"],
-                    finish_reason=result["finish_reason"],
-                )
-            ],
-            usage=CompletionUsage(
-                prompt_tokens=result["tokens_prompt"],
-                completion_tokens=result["tokens_completion"],
-                total_tokens=result["tokens_prompt"] + result["tokens_completion"],
-            ),
-            performance=CompletionPerformance(
-                tokens_per_second=round(tps, 3),
-                duration_seconds=round(duration, 3),
-            ),
-        )
+        return _Finished(result=result, duration=duration, tokens_per_second=tps)
 
     except HTTPException:
         raise
@@ -825,6 +722,67 @@ class _StreamFailure:
     exc: Exception
 
 
+class _ChunkFormatter(Protocol):
+    """Builds the stream chunks of one endpoint's wire format."""
+
+    def opening(self) -> list[dict]:
+        """Chunks sent before the first text, if the format has any."""
+        ...
+
+    def text(self, text: str) -> dict: ...
+
+    def closing(self, finish_reason: str | None) -> dict: ...
+
+    def usage(self, end: StreamEnd) -> dict: ...
+
+
+class _CompletionChunks:
+    """OpenAI text_completion chunks, for /v1/completions."""
+
+    def __init__(self, completion_id: str, model: str) -> None:
+        self._id = completion_id
+        self._model = model
+        self._created = int(time.time())
+
+    def _chunk(self, choices: list[dict], **extra: object) -> dict:
+        return {
+            "id": self._id,
+            "object": "text_completion",
+            "created": self._created,
+            "model": self._model,
+            "choices": choices,
+            **extra,
+        }
+
+    def _choice(self, text: str, finish_reason: str | None) -> dict:
+        return {
+            "index": 0,
+            "text": text,
+            "logprobs": None,
+            "finish_reason": finish_reason,
+        }
+
+    def opening(self) -> list[dict]:
+        return []
+
+    def text(self, text: str) -> dict:
+        return self._chunk([self._choice(text, None)])
+
+    def closing(self, finish_reason: str | None) -> dict:
+        return self._chunk([self._choice("", finish_reason)])
+
+    def usage(self, end: StreamEnd) -> dict:
+        return self._chunk([], usage=_usage(end))
+
+
+def _usage(end: StreamEnd) -> dict:
+    return {
+        "prompt_tokens": end.tokens_prompt,
+        "completion_tokens": end.tokens_completion,
+        "total_tokens": end.tokens_prompt + end.tokens_completion,
+    }
+
+
 class _ClosingStreamingResponse(StreamingResponse):
     """
     StreamingResponse that always closes its body iterator.
@@ -864,8 +822,10 @@ async def _next_event(
     return await asyncio.wait_for(events.get(), timeout=remaining)
 
 
-async def _stream_completion(request: CompletionRequest) -> StreamingResponse:
-    """Serves a completion as server-sent events in OpenAI's chunk format."""
+async def _run_streamed(
+    generation: _Generation, chunks: _ChunkFormatter, include_usage: bool
+) -> StreamingResponse:
+    """Serves a generation as server-sent events in the given chunk format."""
     # Counted while queued, as for buffered requests: this is KEDA's signal.
     INFERENCE_ACTIVE_REQUESTS.inc()
     enqueued_at = time.monotonic()
@@ -891,11 +851,11 @@ async def _stream_completion(request: CompletionRequest) -> StreamingResponse:
         # abandoned (stop_event).
         try:
             source = backend.stream(
-                request.prompt,
-                request.max_tokens,
-                request.temperature,
-                request.top_p,
-                request.stop,
+                generation.prompt,
+                generation.max_tokens,
+                generation.temperature,
+                generation.top_p,
+                generation.stop,
                 stop_event,
             )
             with contextlib.closing(source):
@@ -932,19 +892,9 @@ async def _stream_completion(request: CompletionRequest) -> StreamingResponse:
         _record_outcome(outcome, request_start)
         raise http_exc from first.exc
 
-    include_usage = bool(
-        request.stream_options and request.stream_options.include_usage
-    )
-    completion_id = f"cmpl-{request_id_var.get() or uuid.uuid4().hex}"
     return _ClosingStreamingResponse(
         _sse_body(
-            first,
-            events,
-            deadline,
-            stop_event,
-            request_start,
-            completion_id,
-            include_usage,
+            first, events, deadline, stop_event, request_start, chunks, include_usage
         ),
         media_type="text/event-stream",
         headers=_STREAM_HEADERS,
@@ -957,39 +907,22 @@ async def _sse_body(
     deadline: float,
     stop_event: threading.Event,
     request_start: float,
-    completion_id: str,
+    chunks: _ChunkFormatter,
     include_usage: bool,
 ) -> AsyncIterator[str]:
-    created = int(time.time())
-
-    def chunk(text: str, finish_reason: str | None) -> str:
-        return _sse(
-            {
-                "id": completion_id,
-                "object": "text_completion",
-                "created": created,
-                "model": settings.model_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "text": text,
-                        "logprobs": None,
-                        "finish_reason": finish_reason,
-                    }
-                ],
-            }
-        )
-
     outcome: str | None = None
     first_token_at: float | None = None
     event: StreamEvent | _StreamFailure = first
     try:
+        for opening in chunks.opening():
+            yield _sse(opening)
+
         while True:
             if isinstance(event, TextDelta):
                 if first_token_at is None:
                     first_token_at = time.monotonic()
                     TIME_TO_FIRST_TOKEN_SECONDS.observe(first_token_at - request_start)
-                yield chunk(event.text, None)
+                yield _sse(chunks.text(event.text))
 
             elif isinstance(event, StreamEnd):
                 # Generation is complete at this point; a client that leaves
@@ -999,23 +932,9 @@ async def _sse_body(
                 tps = _record_usage(
                     event.tokens_prompt, event.tokens_completion, duration
                 )
-                yield chunk("", event.finish_reason)
+                yield _sse(chunks.closing(event.finish_reason))
                 if include_usage:
-                    yield _sse(
-                        {
-                            "id": completion_id,
-                            "object": "text_completion",
-                            "created": created,
-                            "model": settings.model_name,
-                            "choices": [],
-                            "usage": {
-                                "prompt_tokens": event.tokens_prompt,
-                                "completion_tokens": event.tokens_completion,
-                                "total_tokens": event.tokens_prompt
-                                + event.tokens_completion,
-                            },
-                        }
-                    )
+                    yield _sse(chunks.usage(event))
                 yield "data: [DONE]\n\n"
 
                 logger.info(

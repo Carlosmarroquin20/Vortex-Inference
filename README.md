@@ -353,7 +353,9 @@ sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m])) / sum(ra
 ```
 vortex-inference/
 ├── app/
-│   ├── main.py               # FastAPI server — lifecycle, endpoints, Prometheus metrics
+│   ├── main.py               # FastAPI server — lifecycle, endpoints, request execution
+│   ├── schemas.py            # OpenAI-compatible request and response models
+│   ├── metrics.py            # Prometheus metric definitions
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
 │   ├── logging_config.py     # logfmt formatter + request ID middleware
 │   └── backends/
