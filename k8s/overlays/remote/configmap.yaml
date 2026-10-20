@@ -1,0 +1,42 @@
+# Backend selection for the remote profile. Defaults to Claude through the
+# Anthropic API; for another provider change the values below, e.g.:
+#
+#   OpenAI:  VORTEX_BACKEND: "openai_compatible"
+#            VORTEX_REMOTE_BASE_URL: "https://api.openai.com/v1"
+#            VORTEX_MODEL_NAME: "<model id>"
+#   vLLM in this cluster:
+#            VORTEX_BACKEND: "openai_compatible"
+#            VORTEX_REMOTE_BASE_URL: "http://vllm.<namespace>.svc:8000/v1"
+#            (also needs an egress rule for that Service; see
+#            networkpolicy-egress.yaml)
+#
+# The provider key is not set here; it comes from the
+# vortex-inference-provider-key Secret (see deployment.yaml in this overlay).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vortex-inference-config
+  namespace: vortex-inference
+data:
+  VORTEX_BACKEND: "anthropic"
+  VORTEX_MODEL_NAME: "claude-opus-5-5"
+
+  # Current Claude models think before answering, and those tokens count
+  # against each request's max_tokens (256 unless the client sets it). Low
+  # effort keeps short completions from being truncated by their own
+  # thinking. Remove the line to use the model's default.
+  VORTEX_ANTHROPIC_EFFORT: "low"
+
+  # Generation happens upstream, so a pod spends a request waiting on the
+  # network rather than on its CPUs and can hold many at once. KEDA still
+  # adds pods before this limit is reached (see keda-autoscaler.yaml).
+  VORTEX_MAX_CONCURRENT_REQUESTS: "16"
+
+  # llama.cpp settings from the base have no effect on remote backends and
+  # are removed so the effective configuration reads correctly in review.
+  VORTEX_MODEL_PATH: null
+  VORTEX_N_CTX: null
+  VORTEX_N_THREADS: null
+  VORTEX_N_GPU_LAYERS: null
+  OMP_NUM_THREADS: null
+  OPENBLAS_NUM_THREADS: null

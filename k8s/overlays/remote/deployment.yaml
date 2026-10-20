@@ -1,0 +1,50 @@
+# Pod changes for remote backends. Merged into k8s/base/deployment.yaml, so
+# everything not listed here (security context, probes' endpoints, rollout
+# strategy, anti-affinity) is inherited unchanged.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vortex-inference
+  namespace: vortex-inference
+spec:
+  template:
+    spec:
+      containers:
+      - name: inference-server
+        # Credential for the upstream API, kept in its own Secret so it can be
+        # rotated without touching the key clients use for this server.
+        # optional=false: without it every request would fail upstream, so a
+        # missing Secret should block the rollout instead.
+        env:
+        - name: VORTEX_REMOTE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-provider-key
+              key: api-key
+              optional: false
+
+        # The process holds no model: the Python runtime, the HTTP clients and
+        # in-flight request buffers. Requests are what the scheduler reserves;
+        # the CPU limit leaves room for TLS and JSON work under bursts.
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "1"
+
+        # Startup takes seconds rather than the minutes a model load needs,
+        # so readiness is checked from the start and the budget is shorter.
+        startupProbe:
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          failureThreshold: 30  # 60s total startup budget
+
+        volumeMounts:
+        - mountPath: /models
+          $patch: delete
+
+      volumes:
+      - name: model-storage
+        $patch: delete

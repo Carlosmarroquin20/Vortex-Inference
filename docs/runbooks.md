@@ -1,6 +1,6 @@
 # Runbooks
 
-Each alert in `k8s/monitoring/prometheus-rules.yaml` links to its section here
+Each alert in `k8s/base/monitoring/prometheus-rules.yaml` links to its section here
 through `runbook_url`. Sections follow the same shape: what fired, who is
 affected, how to find the cause, and how to mitigate.
 
@@ -126,10 +126,10 @@ minutes. KEDA should have scaled out well before this.
    Check for Pending pods and quota rejections:
    `kubectl get events -n vortex-inference | grep -i quota`.
 4. If KEDA reports errors querying Prometheus, verify the server address in
-   `k8s/keda-autoscaler.yaml` matches the Prometheus service.
+   `k8s/base/keda-autoscaler.yaml` matches the Prometheus service.
 
 **Mitigation.** Restore KEDA's metric source, free node capacity, or raise
-`maxReplicaCount` together with the ResourceQuota (see `k8s/namespace.yaml`
+`maxReplicaCount` together with the ResourceQuota (see `k8s/base/namespace.yaml`
 for the sizing formula).
 
 ## VortexInferencePodHighMemoryUsage
@@ -147,7 +147,7 @@ model size rather than by traffic.
 
 **Mitigation.** Lower `VORTEX_N_CTX`, use a smaller quantization, or raise the
 memory limit together with the ResourceQuota and LimitRange in
-`k8s/namespace.yaml`. Apply with `make deploy`.
+`k8s/base/namespace.yaml`. Apply with `make deploy`.
 
 ## VortexInferenceFrequentRestarts
 

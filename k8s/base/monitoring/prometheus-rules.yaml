@@ -28,19 +28,19 @@ spec:
     # multiple dashboard panels. The 5m window smooths single-request spikes
     # that would distort a capacity planning view.
     - record: vortex:inference:tokens_per_second:rate5m
-      expr: >
+      expr: |
         rate(vortex_inference_tokens_generated_total{type="completion"}[5m])
 
     # Request rate provides the denominator for error rate calculations.
     - record: vortex:inference:request_rate:rate5m
-      expr: >
+      expr: |
         rate(vortex_inference_requests_total[5m])
 
     # Error ratio: fraction of requests ending in "error" or "timeout" status.
     # Separating "error" from "timeout" in the labels preserves the ability to
     # distinguish application errors from infrastructure latency issues.
     - record: vortex:inference:error_ratio:rate5m
-      expr: >
+      expr: |
         sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m]))
         /
         sum(rate(vortex_inference_requests_total[5m]))
@@ -58,7 +58,7 @@ spec:
     # for capacity planning — chasing P99 in CPU-bound inference is often
     # not cost-effective; the tail is dominated by long prompts, not instability.
     - alert: VortexInferenceHighP95Latency
-      expr: >
+      expr: |
         histogram_quantile(0.95,
           sum(rate(vortex_inference_duration_seconds_bucket{status=~"success|timeout"}[5m])) by (le)
         ) > 10
@@ -80,7 +80,7 @@ spec:
     # P99 > 30s indicates the tail distribution has degraded significantly.
     # At this point, timeout errors become likely and user-visible.
     - alert: VortexInferenceCriticalP99Latency
-      expr: >
+      expr: |
         histogram_quantile(0.99,
           sum(rate(vortex_inference_duration_seconds_bucket{status=~"success|timeout"}[5m])) by (le)
         ) > 30
@@ -142,7 +142,7 @@ spec:
     # Detects when no pods are ready to serve traffic. This fires before
     # users notice 503s because it triggers on readiness, not on error rates.
     - alert: VortexInferenceNoReadyPods
-      expr: >
+      expr: |
         kube_deployment_status_replicas_ready{
           namespace="vortex-inference",
           deployment="vortex-inference"
@@ -163,7 +163,7 @@ spec:
     # Expected behavior: > 5 active requests should trigger a scale-out within
     # pollingInterval (15s) + pod startup time (~90s).
     - alert: VortexInferencePersistentQueuePressure
-      expr: >
+      expr: |
         sum(vortex_inference_active_requests{namespace="vortex-inference"}) > 5
       for: 10m
       labels:
@@ -181,7 +181,7 @@ spec:
     # At this level, any allocation spike (e.g., a long context completion) risks
     # triggering the Linux OOM killer inside the cgroup before kubelet can react.
     - alert: VortexInferencePodHighMemoryUsage
-      expr: >
+      expr: |
         (
           container_memory_working_set_bytes{
             namespace="vortex-inference",
@@ -211,7 +211,7 @@ spec:
     # it indicates a systematic startup failure (corrupt model, missing PVC mount,
     # or persistent OOM during initialization).
     - alert: VortexInferenceFrequentRestarts
-      expr: >
+      expr: |
         increase(
           kube_pod_container_status_restarts_total{
             namespace="vortex-inference",

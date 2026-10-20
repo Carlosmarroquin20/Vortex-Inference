@@ -35,7 +35,7 @@ metadata:
     app.kubernetes.io/name: vortex-inference
     # Deliberately distinct from the ClusterIP service's component label: the
     # ServiceMonitor selects on it, and matching both services would scrape
-    # every pod twice (see k8s/monitoring/servicemonitor.yaml).
+    # every pod twice (see monitoring/servicemonitor.yaml).
     app.kubernetes.io/component: external-access
   annotations:
     # AWS NLB annotation (commented out — shown to demonstrate production pattern):

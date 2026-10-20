@@ -37,7 +37,7 @@ MONITORING_NAMESPACE="monitoring"
 # 1. Start Minikube
 # =============================================================================
 # --cni=calico: minikube's default CNI does not enforce NetworkPolicy, which
-# would leave k8s/networkpolicy.yaml accepted by the API server but inert.
+# would leave k8s/base/networkpolicy.yaml accepted by the API server but inert.
 log_info "Starting Minikube node (memory=${MINIKUBE_MEMORY}MB, cpus=${MINIKUBE_CPUS})"
 minikube start \
   --memory="${MINIKUBE_MEMORY}" \
@@ -109,9 +109,9 @@ log_warn "  minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models
 # 5. Apply Kubernetes manifests
 # =============================================================================
 log_info "Applying Kubernetes manifests..."
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/networkpolicy.yaml
-kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/base/namespace.yaml
+kubectl apply -f k8s/base/networkpolicy.yaml
+kubectl apply -f k8s/base/configmap.yaml
 
 # The Deployment requires this Secret to start. It is created only when
 # missing so that re-running the bootstrap never rotates a key clients use.
@@ -121,10 +121,10 @@ if ! kubectl get secret vortex-inference-api-key -n "${NAMESPACE}" &>/dev/null; 
     --from-literal=api-key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
   log_info "API key Secret created. Read it with: make show-api-key"
 fi
-kubectl apply -f k8s/model-pv.yaml
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/monitoring/prometheus-rules.yaml
-kubectl apply -f k8s/monitoring/servicemonitor.yaml
+kubectl apply -f k8s/base/model-pv.yaml
+kubectl apply -f k8s/base/service.yaml
+kubectl apply -f k8s/base/monitoring/prometheus-rules.yaml
+kubectl apply -f k8s/base/monitoring/servicemonitor.yaml
 
 log_warn "Skipping the workload (Deployment, PDB, ScaledObject) until the model is loaded."
 log_warn "After the model is available, run: make deploy"

@@ -212,8 +212,13 @@ jobs:
   # performs API discovery against a server to resolve resource mappings, so
   # it fails with "connection refused" on a runner with no cluster.
   #
-  # Note: KEDA CRDs (ScaledObject) are not part of the core schema set, so
-  # keda-autoscaler.yaml is validated for YAML syntax only via yq.
+  # Each deployment profile is rendered with kustomize and the output is what
+  # gets validated, so a patch in an overlay that breaks a field, or that no
+  # longer matches its target in the base, fails here rather than at apply.
+  #
+  # Note: KEDA and prometheus-operator CRDs are not part of the core schema
+  # set, so those kinds are skipped by kubeconform and checked for basic
+  # structure with yq instead.
   # ---------------------------------------------------------------------------
   validate-k8s:
     name: Validate Kubernetes Manifests
@@ -235,8 +240,28 @@ jobs:
           echo "${KUBECONFORM_SHA256}  ${archive}" | sha256sum --check --strict
           sudo tar -xzf "${archive}" -C /usr/local/bin kubeconform
 
+      - name: Install kustomize
+        # Standalone and pinned rather than the runner's kubectl, whose
+        # version changes with runner image updates. v5.7.1 is the version
+        # embedded in kubectl 1.35, which `make deploy` uses.
+        env:
+          KUSTOMIZE_VERSION: v5.7.1
+          KUSTOMIZE_SHA256: ea375e7372f9aa029129d4b2d16c66b7750b7f1213c4f66f910d981c895818d8
+        run: |
+          archive="${RUNNER_TEMP}/kustomize.tar.gz"
+          curl -fsSL -o "${archive}" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  ${archive}" | sha256sum --check --strict
+          sudo tar -xzf "${archive}" -C /usr/local/bin kustomize
+
       # yq ships with the ubuntu-24.04 runner image, so it is not downloaded
       # here; the pinned runner version keeps it stable.
+
+      - name: Render deployment profiles
+        run: |
+          mkdir -p "${RUNNER_TEMP}/rendered"
+          kustomize build k8s/base > "${RUNNER_TEMP}/rendered/local.yaml"
+          kustomize build k8s/overlays/remote > "${RUNNER_TEMP}/rendered/remote.yaml"
 
       - name: Validate core manifests (kubeconform)
         # Fully offline with respect to the cluster: schemas are fetched from
@@ -246,30 +271,27 @@ jobs:
         # indentation and typo mistakes surface.
         run: |
           kubeconform -strict -summary -kubernetes-version 1.35.9 \
-            k8s/namespace.yaml \
-            k8s/networkpolicy.yaml \
-            k8s/configmap.yaml \
-            k8s/model-pv.yaml \
-            k8s/deployment.yaml \
-            k8s/pdb.yaml \
-            k8s/service.yaml
+            -skip ScaledObject,ServiceMonitor,PrometheusRule \
+            "${RUNNER_TEMP}/rendered/local.yaml" \
+            "${RUNNER_TEMP}/rendered/remote.yaml"
 
-      - name: Validate CRD-based manifests (YAML syntax via yq)
+      - name: Validate CRD-based manifests (structure via yq)
         # Resources using third-party API groups (keda.sh, monitoring.coreos.com)
-        # cannot be validated by kubectl without the CRDs installed in a cluster.
-        # yq validates that each file is well-formed YAML with the four required
-        # top-level fields present — sufficient to catch copy-paste structure errors.
+        # have no published schema here. Each must still be a complete object
+        # with the four required top-level fields, and each profile must
+        # contain all three, which catches a patch or resource list that
+        # dropped one.
         run: |
-          for manifest in \
-            k8s/keda-autoscaler.yaml \
-            k8s/monitoring/prometheus-rules.yaml \
-            k8s/monitoring/servicemonitor.yaml; do
-            echo "Validating YAML syntax: ${manifest}"
-            yq eval 'has("apiVersion") and has("kind") and has("metadata") and has("spec")' \
-              "${manifest}" | grep -q "true" || {
-              echo "Invalid manifest structure: ${manifest}"
-              exit 1
-            }
+          for profile in local remote; do
+            rendered="${RUNNER_TEMP}/rendered/${profile}.yaml"
+            for kind in ScaledObject ServiceMonitor PrometheusRule; do
+              count=$(yq eval-all "[select(.kind == \"${kind}\" and has(\"apiVersion\") and has(\"metadata\") and has(\"spec\"))] | length" "${rendered}")
+              if [ "${count}" != "1" ]; then
+                echo "Profile ${profile}: expected one complete ${kind}, found ${count}"
+                exit 1
+              fi
+            done
+            echo "Profile ${profile}: CRD-based resources present and well-formed"
           done
 
       - name: Check for hardcoded secrets

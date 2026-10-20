@@ -1,0 +1,21 @@
+# Default deployment profile: the llama_cpp backend, serving the GGUF model
+# from the PersistentVolume in-process. `make deploy` applies it with
+# `kubectl apply -k k8s/base`.
+#
+# The manifests in this directory are also the base of the other profiles
+# under k8s/overlays/, which patch only what differs. A change made here
+# applies to every profile unless an overlay overrides it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- namespace.yaml
+- networkpolicy.yaml
+- configmap.yaml
+- model-pv.yaml
+- service.yaml
+- deployment.yaml
+- pdb.yaml
+- keda-autoscaler.yaml
+- monitoring/prometheus-rules.yaml
+- monitoring/servicemonitor.yaml

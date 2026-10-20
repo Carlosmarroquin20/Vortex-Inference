@@ -1,0 +1,15 @@
+# Remote backends read no weights, so the model volume and its claim are not
+# created. The PersistentVolume is a hostPath on the node; leaving it out also
+# keeps this profile deployable on clusters that do not allow hostPath.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vortex-model-pvc
+  namespace: vortex-inference
+$patch: delete
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vortex-model-pv
+$patch: delete

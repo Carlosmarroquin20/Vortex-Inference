@@ -1,0 +1,18 @@
+# The base threshold of 3 assumes one request in the engine per pod and the
+# rest queued. With VORTEX_MAX_CONCURRENT_REQUESTS=16 a pod serves up to 16
+# at once, so the target is set below that limit: KEDA adds a pod once the
+# average reaches 10, before requests start queueing for a permit, and a new
+# pod is ready within seconds since there is no model to load.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vortex-inference-scaler
+  namespace: vortex-inference
+spec:
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+      query: sum(vortex_inference_active_requests{namespace="vortex-inference"})
+      threshold: "10"
+      ignoreNullValues: "true"

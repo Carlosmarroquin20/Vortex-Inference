@@ -37,11 +37,12 @@ spec:
 # bearer token; this policy closes every other port. Prometheus scrapes the
 # same port from the monitoring namespace and is covered by this rule.
 #
-# Egress is denied entirely: the server reads weights from a local volume
-# and calls nothing over the network, not even DNS. A compromised process
-# therefore cannot reach other services or exfiltrate data. A future
-# component that needs egress (for example a model download init container)
-# must get its own, narrowly scoped policy.
+# Egress is denied entirely: with the llama_cpp backend the server reads
+# weights from a local volume and calls nothing over the network, not even
+# DNS. A compromised process therefore cannot reach other services or
+# exfiltrate data. Anything that needs egress gets its own, narrowly scoped
+# policy; the remote profile adds one for DNS and HTTPS to the model provider
+# (k8s/overlays/remote/networkpolicy-egress.yaml).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

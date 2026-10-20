@@ -67,8 +67,8 @@ htmlcov/
 # Kubernetes / Helm
 # =============================================================================
 # Local overrides with sensitive values (registry credentials, tokens)
-k8s/secrets*.yaml
-k8s/*-secret.yaml
+k8s/**/secrets*.yaml
+k8s/**/*-secret.yaml
 helm/*/charts/
 helm/*/Chart.lock
 

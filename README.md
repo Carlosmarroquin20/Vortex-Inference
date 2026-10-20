@@ -112,17 +112,13 @@ minikube cp ./models/phi-3-mini-4k-instruct-q4_k_m.gguf /data/models/
 # 5. Build the container image and load it into the minikube node
 make build
 
-# 6. Deploy the inference workload
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/keda-autoscaler.yaml
+# 6. Deploy the inference workload; waits for the startup probe (~90s for model loading)
+make deploy
 
-# 7. Wait for the pod to pass its startup probe (~90s for model loading)
-kubectl rollout status deployment/vortex-inference -n vortex-inference
-
-# 8. Expose the service
+# 7. Expose the service
 minikube tunnel  # Run in a separate terminal
 
-# 9. Test inference
+# 8. Test inference
 INFERENCE_IP=$(kubectl get svc vortex-inference-lb -n vortex-inference -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 API_KEY=$(make --no-print-directory show-api-key)
 curl -X POST "http://${INFERENCE_IP}/v1/completions" \
@@ -220,9 +216,36 @@ VORTEX_MAX_CONCURRENT_REQUESTS=16
   error that the provider reports as 400, such as an unsupported parameter,
   therefore shows up as a rise in `rejected` requests and a WARNING per
   request, not in the error ratio.
-- The Kubernetes manifests are sized for `llama_cpp`, and the NetworkPolicy
-  blocks all egress from the inference pods, so a remote backend does not
-  work in the cluster as shipped.
+- In Kubernetes, remote backends run with the `remote` deployment profile
+  below; the default manifests block all egress from the inference pods.
+
+### Deployment profiles
+
+The manifests are a Kustomize base plus overlays, selected with `PROFILE`:
+
+| Profile | Directory | What it deploys |
+|---|---|---|
+| `local` (default) | `k8s/base` | `llama_cpp` with the GGUF model on a PersistentVolume, 2 CPU / 2–4Gi pods, no egress |
+| `remote` | `k8s/overlays/remote` | A remote backend (Claude by default), no model volume, 250m / 256–512Mi pods, 16 concurrent requests per pod, egress limited to DNS and HTTPS |
+
+```bash
+make build                       # same image for both profiles
+make provider-key                # prompts for the provider's API key (no echo)
+make deploy PROFILE=remote
+```
+
+The provider is chosen in `k8s/overlays/remote/configmap.yaml`, which has
+examples for OpenAI and for a vLLM server inside the cluster. The egress policy
+allows TCP 443 to public addresses only: private ranges, and with them the cloud
+metadata endpoint, stay unreachable. Standard NetworkPolicy cannot match
+hostnames; restricting egress to the provider's domain needs a CNI extension
+such as Cilium's `toFQDNs`. A provider inside the cluster needs its own rule,
+sketched in `k8s/overlays/remote/networkpolicy-egress.yaml`.
+
+`make deploy` with the `local` profile removes the remote egress policy, since
+`kubectl apply` never deletes objects on its own. Switching from `local` to
+`remote` leaves the model's PersistentVolume and claim in place, unused; delete
+them with `kubectl delete -f k8s/base/model-pv.yaml` if they are no longer needed.
 
 ---
 
@@ -243,7 +266,7 @@ kubectl describe scaledobject vortex-inference-scaler -n vortex-inference
 kubectl top pods -n vortex-inference
 ```
 
-The **Vortex Inference** dashboard (`k8s/monitoring/grafana-dashboard.json`) is
+The **Vortex Inference** dashboard (`k8s/base/monitoring/grafana-dashboard.json`) is
 provisioned automatically by `make deploy` through the Grafana sidecar; run
 `make dashboard` to push changes to the JSON without redeploying. It can also be
 imported manually, in which case pick the Prometheus data source from the
@@ -303,16 +326,22 @@ vortex-inference/
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
 ├── k8s/
-│   ├── namespace.yaml        # Namespace + ResourceQuota + LimitRange
-│   ├── configmap.yaml        # Runtime configuration (non-sensitive)
-│   ├── model-pv.yaml         # PersistentVolume + PVC for GGUF model storage
-│   ├── deployment.yaml       # Deployment with probes, anti-affinity, resource limits
-│   ├── service.yaml          # ClusterIP + LoadBalancer services
-│   ├── keda-autoscaler.yaml  # ScaledObject with Prometheus trigger
-│   └── monitoring/
-│       ├── grafana-dashboard.json # Dashboard, provisioned via the Grafana sidecar
-│       ├── prometheus-rules.yaml   # PrometheusRule CRD — SLO alerts + recording rules
-│       └── servicemonitor.yaml     # ServiceMonitor CRD — Prometheus scrape config
+│   ├── base/                 # Default (local) profile and base of the overlays
+│   │   ├── kustomization.yaml
+│   │   ├── namespace.yaml    # Namespace + ResourceQuota + LimitRange
+│   │   ├── networkpolicy.yaml # Default deny; HTTP ingress, no egress
+│   │   ├── configmap.yaml    # Runtime configuration (non-sensitive)
+│   │   ├── model-pv.yaml     # PersistentVolume + PVC for GGUF model storage
+│   │   ├── deployment.yaml   # Deployment with probes, anti-affinity, resource limits
+│   │   ├── service.yaml      # ClusterIP + LoadBalancer services
+│   │   ├── pdb.yaml          # PodDisruptionBudget
+│   │   ├── keda-autoscaler.yaml # ScaledObject with Prometheus trigger
+│   │   └── monitoring/
+│   │       ├── grafana-dashboard.json # Dashboard, provisioned via the Grafana sidecar
+│   │       ├── prometheus-rules.yaml  # PrometheusRule CRD — SLO alerts + recording rules
+│   │       └── servicemonitor.yaml    # ServiceMonitor CRD — Prometheus scrape config
+│   └── overlays/
+│       └── remote/           # Remote-backend profile: patches over base/
 ├── scripts/
 │   ├── setup-minikube.sh     # Cluster bootstrap: Minikube + KEDA + kube-prometheus-stack
 │   └── download-model.sh     # Pinned-revision GGUF download, SHA-256 verified, resumable

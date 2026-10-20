@@ -1,0 +1,28 @@
+# Remote-backend profile: the pods forward completions to a model API
+# (Anthropic, OpenAI or any OpenAI-compatible server) instead of running a
+# model themselves. Apply with `make deploy PROFILE=remote`, after storing the
+# provider's API key with `make provider-key`.
+#
+# Relative to the base in k8s/base/, this profile:
+#   - selects the backend and model in the ConfigMap and drops the
+#     llama.cpp-only settings (configmap.yaml);
+#   - removes the model volume and claim, and sizes the pods for an
+#     I/O-bound process instead of an in-memory model (deployment.yaml,
+#     model-storage.yaml);
+#   - injects the provider key from its own Secret (deployment.yaml);
+#   - allows the one kind of egress the pods need: DNS, and HTTPS to public
+#     addresses (networkpolicy-egress.yaml);
+#   - retunes the KEDA threshold for many concurrent requests per pod
+#     (keda-autoscaler.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base
+- networkpolicy-egress.yaml
+
+patches:
+- path: configmap.yaml
+- path: deployment.yaml
+- path: model-storage.yaml
+- path: keda-autoscaler.yaml
