@@ -48,7 +48,7 @@ A production-grade MLOps platform for serving specialized Small Language Models 
 |---|---|---|
 | Inference runtime | `llama-cpp-python` + GGUF Q4_K_M | Best perplexity/size ratio for 4-bit CPU inference |
 | API framework | FastAPI | Native async — health checks never block inference thread |
-| Autoscaling | KEDA v2.14 (Prometheus trigger) | Scales on actual request load, not CPU utilization |
+| Autoscaling | KEDA v2.21 (Prometheus trigger) | Scales on actual request load, not CPU utilization |
 | Observability | Prometheus + kube-prometheus-stack | Native metrics pipeline — no sidecar required |
 | Orchestration | Kubernetes (Minikube) | Single-node local cluster mirroring production topology |
 | Model | Phi-3-mini-4k-instruct Q4_K_M | 2.4GB on disk, ~2.8GB RAM — fits within 4Gi pod limit |
