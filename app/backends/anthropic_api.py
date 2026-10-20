@@ -17,6 +17,7 @@ import httpx2
 from app.backends.base import (
     BackendError,
     GenerationResult,
+    Prompt,
     StreamEnd,
     StreamEvent,
     TextDelta,
@@ -138,7 +139,7 @@ class AnthropicBackend:
 
     def generate(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -175,7 +176,7 @@ class AnthropicBackend:
 
     def stream(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -231,13 +232,26 @@ class AnthropicBackend:
         )
 
     def _params(
-        self, prompt: str, max_tokens: int, stop: list[str] | None
+        self, prompt: Prompt, max_tokens: int, stop: list[str] | None
     ) -> dict[str, object]:
-        params: dict[str, object] = {
-            "model": self._model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        params: dict[str, object] = {"model": self._model, "max_tokens": max_tokens}
+        if isinstance(prompt, str):
+            params["messages"] = [{"role": "user", "content": prompt}]
+        else:
+            # The Messages API takes instructions in a top-level system field
+            # rather than as a role. System messages are joined in order;
+            # their position relative to the turns is not preserved. Turn
+            # order rules (starting with a user turn, no assistant prefill on
+            # current models) are the API's to enforce: a violation comes
+            # back as a 400 the client can act on.
+            system = [m["content"] for m in prompt if m["role"] == "system"]
+            if system:
+                params["system"] = "\n\n".join(system)
+            params["messages"] = [
+                {"role": m["role"], "content": m["content"]}
+                for m in prompt
+                if m["role"] != "system"
+            ]
         if stop:
             params["stop_sequences"] = stop
         if self._effort is not None:

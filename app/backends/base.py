@@ -10,7 +10,19 @@ create_backend(), with the request path and its tests unchanged.
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Literal, Protocol, TypedDict, runtime_checkable
+
+
+class ChatMessage(TypedDict):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+# What a backend is asked to continue: raw text for a completion, or a
+# conversation for a chat reply. Each backend formats a conversation its own
+# way (the model's chat template for llama.cpp, the provider's chat API for
+# remote backends); either way the result is the assistant's next message.
+Prompt = str | list[ChatMessage]
 
 
 class GenerationResult(TypedDict):
@@ -111,7 +123,7 @@ class InferenceBackend(Protocol):
 
     def generate(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -119,20 +131,21 @@ class InferenceBackend(Protocol):
         stop_event: threading.Event | None = None,
     ) -> GenerationResult:
         """
-        Produces one completion for the prompt.
+        Produces one completion for the prompt: a continuation of raw text, or
+        the assistant's reply to a conversation.
 
         stop_event is set by the HTTP layer when the request is abandoned
         (deadline or client cancellation). Implementations should return as
         soon as practical once it is set; the inference permit is held until
-        they do. Raises RequestRejectedError (for example PromptTooLongError)
-        for requests the client must change, and BackendError for failures
-        the client cannot fix.
+        they do. Raises RequestRejectedError (for example PromptTooLongError,
+        or a conversation the backend cannot format) for requests the client
+        must change, and BackendError for failures the client cannot fix.
         """
         ...
 
     def stream(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,

@@ -1,22 +1,36 @@
 """
 In-process stand-in for llama_cpp.Llama.
 
-Implements only the surface LlamaCppBackend uses (construction, tokenize, and the
-completion call with stopping_criteria, streamed or not), plus instrumentation
-the tests rely on: a record of calls, a high-water mark of concurrent calls to
-detect thread-safety violations, and knobs to make generation slow or failing.
+Implements only the surface LlamaCppBackend uses (construction, metadata,
+tokenize/detokenize, special token IDs, and the completion call with
+stopping_criteria, streamed or not), plus instrumentation the tests rely on: a
+record of calls, a high-water mark of concurrent calls to detect thread-safety
+violations, and knobs to make generation slow or failing.
+
+FakeChatFormatter stands in for llama_cpp.llama_chat_format.Jinja2ChatFormatter.
 """
 
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 logger = logging.getLogger("tests.fake_llama")
 
+BOS_ID, EOS_ID = 1, 2
+
 
 class FakeLlama:
+    # Set before the backend is built to give the model a chat template.
+    chat_template: str | None = None
+
     def __init__(self, **kwargs: object) -> None:
         self.init_kwargs = kwargs
+        self.metadata = (
+            {"tokenizer.chat_template": FakeLlama.chat_template}
+            if FakeLlama.chat_template
+            else {}
+        )
 
         # Behaviour knobs, adjusted per test.
         self.text = " fake completion"
@@ -41,7 +55,25 @@ class FakeLlama:
     def tokenize(self, text: bytes, add_bos: bool = True, special: bool = False):
         # One token per whitespace-separated word keeps context-window
         # arithmetic in tests easy to reason about.
+        self.last_tokenize = {"text": text, "add_bos": add_bos, "special": special}
         return list(range(len(text.split())))
+
+    def detokenize(self, tokens, prev_tokens=None, special: bool = False) -> bytes:
+        names = {BOS_ID: b"<s>", EOS_ID: b"</s>"}
+        return b"".join(names.get(token, b"?") for token in tokens)
+
+    def token_bos(self) -> int:
+        return BOS_ID
+
+    def token_eos(self) -> int:
+        return EOS_ID
+
+    def _prompt_tokens(self, prompt) -> int:
+        # A conversation arrives already tokenized; text is tokenized here,
+        # as llama-cpp-python does.
+        if isinstance(prompt, list):
+            return len(prompt)
+        return len(self.tokenize(prompt.encode()))
 
     def __call__(
         self, prompt: str, stopping_criteria=None, stream: bool = False, **kwargs
@@ -71,7 +103,7 @@ class FakeLlama:
             return {
                 "choices": [{"text": self.text, "finish_reason": self.finish_reason}],
                 "usage": {
-                    "prompt_tokens": len(self.tokenize(prompt.encode())),
+                    "prompt_tokens": self._prompt_tokens(prompt),
                     "completion_tokens": self.completion_tokens,
                 },
             }
@@ -112,3 +144,40 @@ class FakeLlama:
         finally:
             with self._lock:
                 self.active_calls -= 1
+
+
+class FakeChatFormatter:
+    """
+    Renders "<|role|> content" per message plus an assistant cue, and records
+    how it was built and called. render_error makes rendering fail the way a
+    template's raise_exception() does.
+    """
+
+    instances: list["FakeChatFormatter"] = []
+    render_error: Exception | None = None
+
+    def __init__(self, template, eos_token, bos_token, stop_token_ids=None) -> None:
+        self.template = template
+        self.eos_token = eos_token
+        self.bos_token = bos_token
+        self.stop_token_ids = stop_token_ids
+        self.rendered: list[list[dict]] = []
+        self.criteria_calls = 0
+        FakeChatFormatter.instances.append(self)
+
+    def __call__(self, *, messages, **kwargs):
+        if FakeChatFormatter.render_error is not None:
+            raise FakeChatFormatter.render_error
+        self.rendered.append(messages)
+        prompt = "".join(f"<|{m['role']}|> {m['content']} " for m in messages)
+
+        def stopping_criteria(tokens, scores):
+            self.criteria_calls += 1
+            return False
+
+        return SimpleNamespace(
+            prompt=prompt + "<|assistant|>",
+            stop=[self.eos_token],
+            stopping_criteria=stopping_criteria,
+            added_special=True,
+        )

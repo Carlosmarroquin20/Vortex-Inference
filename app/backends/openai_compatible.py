@@ -19,6 +19,7 @@ import httpx2
 from app.backends.base import (
     BackendError,
     GenerationResult,
+    Prompt,
     StreamEnd,
     StreamEvent,
     TextDelta,
@@ -143,7 +144,7 @@ class OpenAICompatibleBackend:
 
     def generate(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -162,7 +163,7 @@ class OpenAICompatibleBackend:
                 text="", finish_reason=None, tokens_prompt=0, tokens_completion=0
             )
 
-        path, body = self._request(prompt, max_tokens, temperature, top_p, stop)
+        path, body, chat = self._request(prompt, max_tokens, temperature, top_p, stop)
         with _transport_errors(), self._inflight.track():
             response = self._client.post(path, json=body)
 
@@ -172,11 +173,11 @@ class OpenAICompatibleBackend:
                 _error_message(response),
                 retry_after=response.headers.get("retry-after"),
             )
-        return self._parse(response)
+        return self._parse(response, chat)
 
     def stream(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -197,7 +198,7 @@ class OpenAICompatibleBackend:
             yield StreamEnd(None, 0, 0)
             return
 
-        path, body = self._request(prompt, max_tokens, temperature, top_p, stop)
+        path, body, chat = self._request(prompt, max_tokens, temperature, top_p, stop)
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
 
@@ -229,7 +230,7 @@ class OpenAICompatibleBackend:
                 if event.get("usage"):
                     usage = event["usage"]
                 for choice in event.get("choices") or []:
-                    text = self._delta_text(choice)
+                    text = self._delta_text(choice, chat)
                     if text:
                         yield TextDelta(text)
                     if choice.get("finish_reason"):
@@ -243,12 +244,18 @@ class OpenAICompatibleBackend:
 
     def _request(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
         stop: list[str] | None,
-    ) -> tuple[str, dict[str, object]]:
+    ) -> tuple[str, dict[str, object], bool]:
+        """
+        Endpoint path, body, and whether the reply is in chat format.
+
+        A conversation always goes to /chat/completions; remote_api_style
+        only decides how a plain text prompt is sent.
+        """
         body: dict[str, object] = {
             "model": self._model,
             self._max_tokens_field: max_tokens,
@@ -259,22 +266,22 @@ class OpenAICompatibleBackend:
         if stop:
             body["stop"] = stop
 
+        if not isinstance(prompt, str):
+            body["messages"] = [dict(message) for message in prompt]
+            return "/chat/completions", body, True
         if self._api_style == "chat":
             body["messages"] = [{"role": "user", "content": prompt}]
-            return "/chat/completions", body
+            return "/chat/completions", body, True
         body["prompt"] = prompt
-        return "/completions", body
+        return "/completions", body, False
 
-    def _parse(self, response: httpx2.Response) -> GenerationResult:
+    def _parse(self, response: httpx2.Response, chat: bool) -> GenerationResult:
         try:
             payload = response.json()
             choice = payload["choices"][0]
-            if self._api_style == "chat":
-                # content is null when the model answers with a refusal or a
-                # tool call instead of text; neither is requested here.
-                text = choice["message"]["content"] or ""
-            else:
-                text = choice["text"]
+            # A chat message's content is null when the model answers with a
+            # refusal or a tool call instead of text; neither is requested here.
+            text = (choice["message"]["content"] or "") if chat else choice["text"]
             if not isinstance(text, str):
                 raise TypeError(f"completion text is {type(text).__name__}")
             usage = payload.get("usage") or {}
@@ -311,10 +318,11 @@ class OpenAICompatibleBackend:
             raise BackendError(f"Upstream failed mid-stream: {message}")
         return event
 
-    def _delta_text(self, choice: object) -> str | None:
+    @staticmethod
+    def _delta_text(choice: object, chat: bool) -> str | None:
         if not isinstance(choice, dict):
             raise BackendError(f"Upstream stream choice is malformed: {choice!r}")
-        if self._api_style == "chat":
+        if chat:
             delta = choice.get("delta") or {}
             text = delta.get("content") if isinstance(delta, dict) else None
         else:

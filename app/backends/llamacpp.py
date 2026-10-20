@@ -10,12 +10,16 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 from llama_cpp import Llama
 
 from app.backends.base import (
+    ChatMessage,
     GenerationResult,
+    Prompt,
     PromptTooLongError,
+    RequestRejectedError,
     StreamEnd,
     StreamEvent,
     TextDelta,
@@ -23,6 +27,20 @@ from app.backends.base import (
 from app.config import Settings
 
 logger = logging.getLogger("vortex.backends.llamacpp")
+
+StoppingCriteria = Callable[[list[int], list[float]], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    """A prompt in the form llama-cpp-python is called with."""
+
+    # Text for a completion; token IDs for a conversation, which is rendered
+    # and tokenized here so its length can be checked before generation.
+    model_input: str | list[int]
+    prompt_tokens: int
+    stop: list[str]
+    stopping_criteria: StoppingCriteria | None
 
 
 class LlamaCppBackend:
@@ -64,6 +82,7 @@ class LlamaCppBackend:
             n_gpu_layers=settings.n_gpu_layers,
             verbose=False,
         )
+        self._chat_formatter = self._load_chat_formatter()
 
         self._ready = True
         logger.info("Model successfully loaded into memory and ready for inference.")
@@ -91,7 +110,7 @@ class LlamaCppBackend:
 
     def generate(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -111,18 +130,18 @@ class LlamaCppBackend:
         boundary. This lets the thread exit cleanly so the semaphore in main.py
         can be released without racing against an in-progress C++ call.
         """
-        self._check_prompt(prompt)
+        prepared = self._prepare(prompt, stop, stop_event)
 
         self._busy_since = time.monotonic()
         try:
             output = self._model(
-                prompt,
+                prepared.model_input,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                stop=stop or [],
+                stop=prepared.stop,
                 echo=False,
-                stopping_criteria=self._stopping_criteria(stop_event),
+                stopping_criteria=prepared.stopping_criteria,
             )
         finally:
             self._busy_since = None
@@ -139,7 +158,7 @@ class LlamaCppBackend:
 
     def stream(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -158,20 +177,20 @@ class LlamaCppBackend:
         Measured against a non-streamed call on the same prompt this matched
         exactly, where re-tokenizing the output text was off by one.
         """
-        prompt_tokens = self._check_prompt(prompt)
+        prepared = self._prepare(prompt, stop, stop_event)
 
         completion_tokens = 0
         finish_reason: str | None = None
         self._busy_since = time.monotonic()
         try:
             chunks = self._model(
-                prompt,
+                prepared.model_input,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                stop=stop or [],
+                stop=prepared.stop,
                 echo=False,
-                stopping_criteria=self._stopping_criteria(stop_event),
+                stopping_criteria=prepared.stopping_criteria,
                 stream=True,
             )
             try:
@@ -195,30 +214,135 @@ class LlamaCppBackend:
             # that is no longer running.
             self._busy_since = None
 
-        yield StreamEnd(finish_reason, prompt_tokens, completion_tokens)
+        yield StreamEnd(finish_reason, prepared.prompt_tokens, completion_tokens)
 
-    def _check_prompt(self, prompt: str) -> int:
+    def _prepare(
+        self,
+        prompt: Prompt,
+        stop: list[str] | None,
+        stop_event: threading.Event | None,
+    ) -> _Prepared:
+        if isinstance(prompt, str):
+            prompt_tokens = len(self._model.tokenize(prompt.encode("utf-8")))
+            self._check_length(prompt_tokens)
+            return _Prepared(
+                model_input=prompt,
+                prompt_tokens=prompt_tokens,
+                stop=list(stop or []),
+                stopping_criteria=self._stopping_criteria(stop_event, None),
+            )
+        return self._prepare_chat(prompt, stop, stop_event)
+
+    def _prepare_chat(
+        self,
+        messages: list[ChatMessage],
+        stop: list[str] | None,
+        stop_event: threading.Event | None,
+    ) -> _Prepared:
         """
-        Returns the prompt's token count, or raises if it cannot fit.
+        Renders a conversation with the model's own chat template.
+
+        This is what llama-cpp-python's create_chat_completion does
+        internally, done here instead so the result goes through the same
+        completion call as a text prompt: create_chat_completion accepts no
+        stopping_criteria, so a timed-out chat request could not be stopped
+        until it reached max_tokens, and the prompt length could not be
+        checked before generation. Tokenization flags and the template's stop
+        conditions follow the library's handler.
+        """
+        if self._chat_formatter is None:
+            raise RequestRejectedError(
+                "The loaded model has no chat template. Use /v1/completions "
+                "with a prompt in the model's own format."
+            )
+        try:
+            formatted = self._chat_formatter(messages=messages)
+        except Exception as exc:
+            # Templates enforce their own rules with raise_exception(), for
+            # example strict user/assistant alternation; rendering is a pure
+            # function of the messages, so a failure is the conversation's.
+            raise RequestRejectedError(
+                f"The conversation does not fit the model's chat template: {exc}"
+            ) from exc
+
+        tokens = self._model.tokenize(
+            formatted.prompt.encode("utf-8"),
+            add_bos=not formatted.added_special,
+            special=True,
+        )
+        self._check_length(len(tokens))
+
+        template_stop = formatted.stop or []
+        if isinstance(template_stop, str):
+            template_stop = [template_stop]
+        return _Prepared(
+            model_input=tokens,
+            prompt_tokens=len(tokens),
+            stop=[*(stop or []), *template_stop],
+            stopping_criteria=self._stopping_criteria(
+                stop_event, formatted.stopping_criteria
+            ),
+        )
+
+    def _load_chat_formatter(self):
+        """
+        Builds a formatter from the template embedded in the GGUF file, the
+        same template the model was trained with and Hugging Face applies.
+        """
+        template = self._model.metadata.get("tokenizer.chat_template")
+        if not template:
+            logger.warning(
+                "The model has no chat template in its metadata; "
+                "/v1/chat/completions will reject requests."
+            )
+            return None
+
+        # Imported here so environments that fake llama_cpp for tests only
+        # need the submodule when a template is present.
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+
+        eos_id = self._model.token_eos()
+        bos_id = self._model.token_bos()
+        logger.info("Chat template loaded from the model's metadata.")
+        return Jinja2ChatFormatter(
+            template=template,
+            eos_token=self._token_text(eos_id),
+            bos_token=self._token_text(bos_id),
+            stop_token_ids=[eos_id],
+        )
+
+    def _token_text(self, token_id: int) -> str:
+        if token_id == -1:
+            return ""
+        return self._model.detokenize([token_id], special=True).decode(
+            "utf-8", errors="ignore"
+        )
+
+    def _check_length(self, prompt_tokens: int) -> None:
+        """
+        Raises if the prompt alone fills the context window.
 
         Checked explicitly so the API can answer 400 with a precise message.
         llama-cpp-python raises a bare ValueError for this case, which is
         indistinguishable from internal failures. Tokenizing an extra time is
         negligible next to generation.
         """
-        prompt_tokens = len(self._model.tokenize(prompt.encode("utf-8")))
         if prompt_tokens >= self._n_ctx:
             raise PromptTooLongError(prompt_tokens, self._n_ctx)
-        return prompt_tokens
 
     @staticmethod
     def _stopping_criteria(
         stop_event: threading.Event | None,
-    ) -> Callable[[list[int], list[float]], bool] | None:
-        if stop_event is None:
+        template_criteria: StoppingCriteria | None,
+    ) -> StoppingCriteria | None:
+        if stop_event is None and template_criteria is None:
             return None
 
         def stopping_criteria(tokens: list[int], scores: list[float]) -> bool:
-            return stop_event.is_set()
+            if stop_event is not None and stop_event.is_set():
+                return True
+            return template_criteria is not None and bool(
+                template_criteria(tokens, scores)
+            )
 
         return stopping_criteria

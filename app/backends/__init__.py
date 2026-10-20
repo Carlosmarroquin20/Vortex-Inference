@@ -2,8 +2,10 @@
 
 from app.backends.base import (
     BackendError,
+    ChatMessage,
     GenerationResult,
     InferenceBackend,
+    Prompt,
     PromptTooLongError,
     RequestRejectedError,
     StreamEnd,
@@ -14,8 +16,10 @@ from app.config import Settings
 
 __all__ = [
     "BackendError",
+    "ChatMessage",
     "GenerationResult",
     "InferenceBackend",
+    "Prompt",
     "PromptTooLongError",
     "RequestRejectedError",
     "StreamEnd",

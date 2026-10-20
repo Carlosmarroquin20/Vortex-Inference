@@ -21,7 +21,7 @@ import types
 
 import pytest
 
-from tests.fakes import FakeLlama
+from tests.fakes import FakeChatFormatter, FakeLlama
 
 _TEST_ENV = {
     "VORTEX_BACKEND": "llama_cpp",
@@ -40,7 +40,11 @@ os.environ.update(_TEST_ENV)
 
 _fake_llama_cpp = types.ModuleType("llama_cpp")
 _fake_llama_cpp.Llama = FakeLlama
+_fake_chat_format = types.ModuleType("llama_cpp.llama_chat_format")
+_fake_chat_format.Jinja2ChatFormatter = FakeChatFormatter
+_fake_llama_cpp.llama_chat_format = _fake_chat_format
 sys.modules["llama_cpp"] = _fake_llama_cpp
+sys.modules["llama_cpp.llama_chat_format"] = _fake_chat_format
 
 from fastapi.testclient import TestClient  # noqa: E402
 
