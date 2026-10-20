@@ -98,6 +98,30 @@ spec:
           may be blocked by the node's ResourceQuota or by slow pod startup.
           Verify KEDA is functioning and check for pending pods.
 
+    # SLO: 95% of streamed requests start producing output within 10s of
+    # arriving. For a streaming client this matters more than total duration,
+    # which grows with max_tokens by design. Measured from arrival, so it
+    # fires on queueing as well as on slow prompt processing; the runbook
+    # tells the two apart. With no streamed traffic the quantile is NaN and
+    # the alert stays inactive.
+    - alert: VortexInferenceSlowTimeToFirstToken
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(vortex_inference_time_to_first_token_seconds_bucket[5m])) by (le)
+        ) > 10
+      for: 5m
+      labels:
+        severity: warning
+        team: mlops
+        slo: latency
+      annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferenceslowtimetofirsttoken"
+        summary: "Streamed requests wait more than 10s for their first token (P95)"
+        description: >
+          P95 time to first token is {{ $value | humanizeDuration }}.
+          Compare with the queue wait P95 to tell missing capacity from slow
+          prompt processing or a slow upstream provider.
+
   # ---------------------------------------------------------------------------
   # SLO Alerts — error rate
   # ---------------------------------------------------------------------------

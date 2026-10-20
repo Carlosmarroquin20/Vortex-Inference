@@ -1,0 +1,65 @@
+# promtool unit tests for k8s/base/monitoring/prometheus-rules.yaml.
+#
+# promtool reads plain rule files, not PrometheusRule objects, so CI extracts
+# the object's spec into rendered-rules.yaml next to this file first:
+#
+#   yq '.spec' k8s/base/monitoring/prometheus-rules.yaml > tests/monitoring/rendered-rules.yaml
+#   promtool test rules tests/monitoring/prometheus-rules.test.yaml
+#
+# Histogram buckets use the label values prometheus_client exports ("10.0",
+# "+Inf"), so the series below look like what Prometheus scrapes.
+rule_files:
+  - rendered-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Every streamed request waits between 8s and 15s (adjacent buckets of the
+  # metric) for its first token: the interpolated P95 is 8 + 7 * 0.95 =
+  # 14.65s, above the 10s objective.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_inference_time_to_first_token_seconds_bucket{le="8.0"}'
+        values: "0+0x20"
+      - series: 'vortex_inference_time_to_first_token_seconds_bucket{le="15.0"}'
+        values: "0+6x20"
+      - series: 'vortex_inference_time_to_first_token_seconds_bucket{le="+Inf"}'
+        values: "0+6x20"
+    alert_rule_test:
+      # Breaching for less than the 5m hold: pending, not firing yet.
+      - eval_time: 4m
+        alertname: VortexInferenceSlowTimeToFirstToken
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: VortexInferenceSlowTimeToFirstToken
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: mlops
+              slo: latency
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferenceslowtimetofirsttoken"
+              summary: "Streamed requests wait more than 10s for their first token (P95)"
+              description: "P95 time to first token is 14.65s. Compare with the queue wait P95 to tell missing capacity from slow prompt processing or a slow upstream provider.\n"
+
+  # Fast streams: every first token within 2s.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_inference_time_to_first_token_seconds_bucket{le="2.0"}'
+        values: "0+6x20"
+      - series: 'vortex_inference_time_to_first_token_seconds_bucket{le="+Inf"}'
+        values: "0+6x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VortexInferenceSlowTimeToFirstToken
+        exp_alerts: []
+
+  # No streamed traffic at all: the quantile is NaN and nothing fires.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_inference_requests_total{status="success"}'
+        values: "0+10x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VortexInferenceSlowTimeToFirstToken
+        exp_alerts: []

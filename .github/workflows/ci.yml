@@ -294,6 +294,34 @@ jobs:
             echo "Profile ${profile}: CRD-based resources present and well-formed"
           done
 
+      - name: Install promtool
+        # Verified like kubeconform above; only promtool is extracted from the
+        # Prometheus release archive.
+        env:
+          PROMETHEUS_VERSION: 3.15.0
+          PROMETHEUS_SHA256: 2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0
+        run: |
+          archive="${RUNNER_TEMP}/prometheus.tar.gz"
+          curl -fsSL -o "${archive}" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          echo "${PROMETHEUS_SHA256}  ${archive}" | sha256sum --check --strict
+          sudo tar -xzf "${archive}" -C /usr/local/bin --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+
+      - name: Check and unit-test alerting rules (promtool)
+        # The structure check above cannot see PromQL. promtool parses every
+        # expression and template and runs the alert unit tests, which pin
+        # thresholds, hold durations and annotations. promtool reads plain
+        # rule files, and the PrometheusRule spec is one.
+        run: |
+          yq '.spec' k8s/base/monitoring/prometheus-rules.yaml > tests/monitoring/rendered-rules.yaml
+          promtool check rules tests/monitoring/rendered-rules.yaml
+          promtool test rules tests/monitoring/prometheus-rules.test.yaml
+
+      - name: Validate Grafana dashboard JSON
+        run: |
+          jq -e '.panels | length > 0' k8s/base/monitoring/grafana-dashboard.json > /dev/null
+
       - name: Check for hardcoded secrets
         # Rudimentary secret scan: fails if any manifest contains patterns
         # that suggest a committed credential. Not a substitute for a proper

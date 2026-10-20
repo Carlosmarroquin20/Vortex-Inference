@@ -380,6 +380,7 @@ sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m])) / sum(ra
 |---|---|---|
 | P95 inference latency | < 10s | Warning |
 | P99 inference latency | < 30s | Critical |
+| P95 time to first token (streamed) | < 10s | Warning |
 | Error ratio (5m window) | < 1% | Warning |
 | Error ratio (5m window) | < 5% | Critical |
 | Ready pod count | ≥ 1 | Critical |
@@ -448,4 +449,13 @@ grep -v '^llama-cpp-python' requirements.txt > /tmp/requirements-test.txt
 pip install -r /tmp/requirements-test.txt -r requirements-dev.txt
 pytest --cov
 ruff check . && ruff format . --check
+```
+
+The alerting rules have their own unit tests, run with
+[promtool](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/)
+(shipped with Prometheus) and [yq](https://github.com/mikefarah/yq):
+
+```bash
+yq '.spec' k8s/base/monitoring/prometheus-rules.yaml > tests/monitoring/rendered-rules.yaml
+promtool test rules tests/monitoring/prometheus-rules.test.yaml
 ```
