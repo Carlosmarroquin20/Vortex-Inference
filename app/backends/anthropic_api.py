@@ -8,13 +8,19 @@ same client the OpenAI-compatible backend uses.
 
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import anthropic
 import httpx2
-from anthropic.types import Message
-from anthropic.types.beta import BetaMessage
 
-from app.backends.base import BackendError, GenerationResult
+from app.backends.base import (
+    BackendError,
+    GenerationResult,
+    StreamEnd,
+    StreamEvent,
+    TextDelta,
+)
 from app.backends.upstream import InflightTracker, status_error
 from app.config import Settings
 
@@ -33,6 +39,20 @@ _FINISH_REASONS = {
     "stop_sequence": "stop",
     "max_tokens": "length",
     "refusal": "content_filter",
+}
+
+# HTTP status for each API error type, for errors that arrive as an event in
+# an already-open stream and therefore carry no status of their own.
+_ERROR_TYPE_STATUS = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "api_error": 500,
+    "timeout_error": 504,
+    "overloaded_error": 529,
 }
 
 
@@ -139,6 +159,80 @@ class AnthropicBackend:
                 text="", finish_reason=None, tokens_prompt=0, tokens_completion=0
             )
 
+        with _api_errors(), self._inflight.track():
+            message = self._create(self._params(prompt, max_tokens, stop))
+
+        # Only text blocks are returned. With thinking enabled the response
+        # also carries thinking blocks, which are internal to the model.
+        text = "".join(block.text for block in message.content if block.type == "text")
+        self._log_outcome(message.stop_reason, message.stop_details, message.model)
+        return GenerationResult(
+            text=text,
+            finish_reason=_FINISH_REASONS.get(message.stop_reason, message.stop_reason),
+            tokens_prompt=message.usage.input_tokens,
+            tokens_completion=message.usage.output_tokens,
+        )
+
+    def stream(
+        self,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop: list[str] | None,
+        stop_event: threading.Event | None = None,
+    ) -> Iterator[StreamEvent]:
+        """
+        Streams the completion from the Messages API's server-sent events.
+
+        Only text deltas are forwarded; thinking and the fallback marker block
+        are internal. A refusal fallback continues on the same stream, so text
+        streamed before a mid-stream decline stays valid and the fallback
+        model's text follows it. If the decline is final the stream ends with
+        finish_reason content_filter after the partial text, which the client
+        should then discard; it cannot be withdrawn once sent.
+        """
+        if stop_event is not None and stop_event.is_set():
+            yield StreamEnd(None, 0, 0)
+            return
+
+        tokens_prompt = tokens_completion = 0
+        stop_reason = stop_details = served_by = None
+        with (
+            _api_errors(),
+            self._inflight.track(),
+            self._create(self._params(prompt, max_tokens, stop), stream=True) as events,
+        ):
+            for event in events:
+                if stop_event is not None and stop_event.is_set():
+                    # Leaving the context closes the connection, which ends
+                    # generation (and billing) upstream.
+                    return
+                if event.type == "message_start":
+                    served_by = event.message.model
+                    tokens_prompt = event.message.usage.input_tokens
+                elif event.type == "content_block_delta":
+                    if event.delta.type == "text_delta" and event.delta.text:
+                        yield TextDelta(event.delta.text)
+                elif event.type == "message_delta":
+                    stop_reason = event.delta.stop_reason or stop_reason
+                    stop_details = event.delta.stop_details or stop_details
+                    # Cumulative counts. After a mid-stream fallback the final
+                    # message_delta also restates the input count.
+                    tokens_completion = event.usage.output_tokens
+                    if event.usage.input_tokens:
+                        tokens_prompt = event.usage.input_tokens
+
+        self._log_outcome(stop_reason, stop_details, served_by)
+        yield StreamEnd(
+            _FINISH_REASONS.get(stop_reason, stop_reason),
+            tokens_prompt,
+            tokens_completion,
+        )
+
+    def _params(
+        self, prompt: str, max_tokens: int, stop: list[str] | None
+    ) -> dict[str, object]:
         params: dict[str, object] = {
             "model": self._model,
             "max_tokens": max_tokens,
@@ -148,56 +242,55 @@ class AnthropicBackend:
             params["stop_sequences"] = stop
         if self._effort is not None:
             params["output_config"] = {"effort": self._effort}
+        return params
 
-        try:
-            with self._inflight.track():
-                if self._refusal_fallback:
-                    message = self._client.beta.messages.create(
-                        betas=[_FALLBACK_BETA], fallbacks="default", **params
-                    )
-                else:
-                    message = self._client.messages.create(**params)
-        except anthropic.APITimeoutError as exc:
-            raise BackendError(
-                f"Anthropic API did not respond in time: {exc!r}", status_code=504
-            ) from exc
-        except anthropic.APIConnectionError as exc:
-            raise BackendError(f"Anthropic API unreachable: {exc!r}") from exc
-        except anthropic.APIStatusError as exc:
-            # request_id identifies the call in Anthropic's own logs; it is
-            # what support asks for when a failure needs investigating.
-            message_text = f"{_error_message(exc)} (request_id={exc.request_id})"
-            raise status_error(
-                exc.status_code,
-                message_text,
-                retry_after=exc.response.headers.get("retry-after"),
-            ) from exc
+    def _create(self, params: dict[str, object], **options: object):
+        if self._refusal_fallback:
+            return self._client.beta.messages.create(
+                betas=[_FALLBACK_BETA], fallbacks="default", **params, **options
+            )
+        return self._client.messages.create(**params, **options)
 
-        return self._to_result(message)
-
-    def _to_result(self, message: Message | BetaMessage) -> GenerationResult:
-        # Only text blocks are returned. With thinking enabled the response
-        # also carries thinking blocks, which are internal to the model.
-        text = "".join(block.text for block in message.content if block.type == "text")
-        stop_reason = message.stop_reason
+    def _log_outcome(
+        self, stop_reason: str | None, stop_details: object, served_by: str | None
+    ) -> None:
         if stop_reason == "refusal":
             # A refusal is an HTTP 200 and stays one here: the request was
             # valid and the model answered by declining. With the fallback
             # enabled this means the fallback model declined as well.
             logger.info(
                 "Model declined the request.",
-                extra={"category": getattr(message.stop_details, "category", None)},
+                extra={"category": getattr(stop_details, "category", None)},
             )
-        if message.model != self._model:
+        if served_by is not None and served_by != self._model:
             # A refusal fallback served the request on another model.
             logger.info(
                 "Completion served by a fallback model.",
-                extra={"requested": self._model, "served": message.model},
+                extra={"requested": self._model, "served": served_by},
             )
 
-        return GenerationResult(
-            text=text,
-            finish_reason=_FINISH_REASONS.get(stop_reason, stop_reason),
-            tokens_prompt=message.usage.input_tokens,
-            tokens_completion=message.usage.output_tokens,
-        )
+
+@contextmanager
+def _api_errors() -> Iterator[None]:
+    """Maps SDK exceptions to the backend error types."""
+    try:
+        yield
+    except anthropic.APITimeoutError as exc:
+        raise BackendError(
+            f"Anthropic API did not respond in time: {exc!r}", status_code=504
+        ) from exc
+    except anthropic.APIConnectionError as exc:
+        raise BackendError(f"Anthropic API unreachable: {exc!r}") from exc
+    except anthropic.APIStatusError as exc:
+        # An error event inside a stream is raised with the stream's own
+        # status, 200, so the status is recovered from the error type.
+        status = exc.status_code
+        if status < 400:
+            status = _ERROR_TYPE_STATUS.get(exc.type or "", 500)
+        # request_id identifies the call in Anthropic's own logs; it is what
+        # support asks for when a failure needs investigating.
+        raise status_error(
+            status,
+            f"{_error_message(exc)} (request_id={exc.request_id})",
+            retry_after=exc.response.headers.get("retry-after"),
+        ) from exc

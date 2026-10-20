@@ -8,6 +8,8 @@ create_backend(), with the request path and its tests unchanged.
 """
 
 import threading
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Protocol, TypedDict, runtime_checkable
 
 
@@ -17,6 +19,25 @@ class GenerationResult(TypedDict):
     finish_reason: str | None
     tokens_prompt: int
     tokens_completion: int
+
+
+@dataclass(frozen=True, slots=True)
+class TextDelta:
+    """The next fragment of generated text."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEnd:
+    """Final event of a stream that completed; carries what usage reports."""
+
+    finish_reason: str | None
+    tokens_prompt: int
+    tokens_completion: int
+
+
+StreamEvent = TextDelta | StreamEnd
 
 
 class RequestRejectedError(ValueError):
@@ -106,6 +127,30 @@ class InferenceBackend(Protocol):
         they do. Raises RequestRejectedError (for example PromptTooLongError)
         for requests the client must change, and BackendError for failures
         the client cannot fix.
+        """
+        ...
+
+    def stream(
+        self,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop: list[str] | None,
+        stop_event: threading.Event | None = None,
+    ) -> Iterator[StreamEvent]:
+        """
+        Produces the completion incrementally: TextDelta events in order,
+        then exactly one StreamEnd.
+
+        Runs in a worker thread like generate() and raises the same errors.
+        The HTTP layer waits for the first event before it commits to a
+        streaming response, so a failure raised before any event still gets
+        its proper status code; a failure after that can only end the stream.
+        The consumer may stop iterating early (client disconnect, deadline);
+        implementations must then release what they hold, which for a
+        generator means cleaning up when it is closed, and should also stop
+        once stop_event is set.
         """
         ...
 

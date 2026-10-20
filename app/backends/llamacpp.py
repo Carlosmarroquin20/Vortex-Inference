@@ -9,10 +9,17 @@ single-permit concurrency in the deployment are sized for.
 import logging
 import threading
 import time
+from collections.abc import Callable, Iterator
 
 from llama_cpp import Llama
 
-from app.backends.base import GenerationResult, PromptTooLongError
+from app.backends.base import (
+    GenerationResult,
+    PromptTooLongError,
+    StreamEnd,
+    StreamEvent,
+    TextDelta,
+)
 from app.config import Settings
 
 logger = logging.getLogger("vortex.backends.llamacpp")
@@ -78,7 +85,7 @@ class LlamaCppBackend:
         pass
 
     def busy_seconds(self) -> float:
-        """Seconds the current generate() call has spent in llama.cpp, or 0."""
+        """Seconds the current call has spent in llama.cpp, or 0."""
         started = self._busy_since
         return time.monotonic() - started if started is not None else 0.0
 
@@ -104,19 +111,7 @@ class LlamaCppBackend:
         boundary. This lets the thread exit cleanly so the semaphore in main.py
         can be released without racing against an in-progress C++ call.
         """
-        # Checked explicitly so the API can answer 400 with a precise message.
-        # llama-cpp-python raises a bare ValueError for this case, which is
-        # indistinguishable from internal failures. Tokenizing an extra time
-        # is negligible next to generation.
-        prompt_tokens = len(self._model.tokenize(prompt.encode("utf-8")))
-        if prompt_tokens >= self._n_ctx:
-            raise PromptTooLongError(prompt_tokens, self._n_ctx)
-
-        stopping_criteria = None
-        if stop_event is not None:
-
-            def stopping_criteria(tokens: list[int], scores: list[float]) -> bool:
-                return stop_event.is_set()
+        self._check_prompt(prompt)
 
         self._busy_since = time.monotonic()
         try:
@@ -127,7 +122,7 @@ class LlamaCppBackend:
                 top_p=top_p,
                 stop=stop or [],
                 echo=False,
-                stopping_criteria=stopping_criteria,
+                stopping_criteria=self._stopping_criteria(stop_event),
             )
         finally:
             self._busy_since = None
@@ -141,3 +136,91 @@ class LlamaCppBackend:
             "tokens_prompt": output["usage"]["prompt_tokens"],
             "tokens_completion": output["usage"]["completion_tokens"],
         }
+
+    def stream(
+        self,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop: list[str] | None,
+        stop_event: threading.Event | None = None,
+    ) -> Iterator[StreamEvent]:
+        """
+        Streaming variant of generate(), built on llama-cpp-python's stream
+        mode so stop sequences, end-of-generation tokens and max_tokens behave
+        exactly as in a non-streamed call.
+
+        The library does not report usage when streaming, and a chunk can
+        span several tokens (it groups the tokens of a multi-byte character),
+        so the completion count comes from re-tokenizing the returned text.
+        It can differ by a token from the count of a non-streamed call, for
+        example when a matched stop sequence consumed tokens that were never
+        returned.
+        """
+        prompt_tokens = self._check_prompt(prompt)
+
+        pieces: list[str] = []
+        finish_reason: str | None = None
+        self._busy_since = time.monotonic()
+        try:
+            chunks = self._model(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop or [],
+                echo=False,
+                stopping_criteria=self._stopping_criteria(stop_event),
+                stream=True,
+            )
+            try:
+                for chunk in chunks:
+                    choice = chunk["choices"][0]
+                    if choice["text"]:
+                        pieces.append(choice["text"])
+                        yield TextDelta(choice["text"])
+                    if choice["finish_reason"] is not None:
+                        finish_reason = choice["finish_reason"]
+            finally:
+                # Also reached when the consumer closes this generator early:
+                # closing the library's generator stops sampling at once.
+                chunks.close()
+        finally:
+            # Cleared on every exit so the stall detection never sees a call
+            # that is no longer running.
+            self._busy_since = None
+
+        text = "".join(pieces)
+        completion_tokens = (
+            len(self._model.tokenize(text.encode("utf-8"), add_bos=False))
+            if text
+            else 0
+        )
+        yield StreamEnd(finish_reason, prompt_tokens, completion_tokens)
+
+    def _check_prompt(self, prompt: str) -> int:
+        """
+        Returns the prompt's token count, or raises if it cannot fit.
+
+        Checked explicitly so the API can answer 400 with a precise message.
+        llama-cpp-python raises a bare ValueError for this case, which is
+        indistinguishable from internal failures. Tokenizing an extra time is
+        negligible next to generation.
+        """
+        prompt_tokens = len(self._model.tokenize(prompt.encode("utf-8")))
+        if prompt_tokens >= self._n_ctx:
+            raise PromptTooLongError(prompt_tokens, self._n_ctx)
+        return prompt_tokens
+
+    @staticmethod
+    def _stopping_criteria(
+        stop_event: threading.Event | None,
+    ) -> Callable[[list[int], list[float]], bool] | None:
+        if stop_event is None:
+            return None
+
+        def stopping_criteria(tokens: list[int], scores: list[float]) -> bool:
+            return stop_event.is_set()
+
+        return stopping_criteria

@@ -6,6 +6,9 @@ from app.backends.base import (
     InferenceBackend,
     PromptTooLongError,
     RequestRejectedError,
+    StreamEnd,
+    StreamEvent,
+    TextDelta,
 )
 from app.config import Settings
 
@@ -15,6 +18,9 @@ __all__ = [
     "InferenceBackend",
     "PromptTooLongError",
     "RequestRejectedError",
+    "StreamEnd",
+    "StreamEvent",
+    "TextDelta",
     "create_backend",
 ]
 
