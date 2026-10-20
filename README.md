@@ -182,9 +182,12 @@ for chunk in client.completions.create(
 - **Token counts.** For `llama_cpp` the library reports no usage when
   streaming, so completion tokens are counted per returned chunk; that matches
   the buffered count except when a multi-byte character spans several tokens.
-- **Time to first token** is recorded in
-  `vortex_inference_time_to_first_token_seconds` (from permit to first chunk;
-  queue wait is in `vortex_inference_queue_wait_seconds`).
+- **Streaming latency** is recorded as
+  `vortex_inference_time_to_first_token_seconds`, from the request's arrival
+  to its first chunk (what the client waits, queue included; the queue part
+  alone is `vortex_inference_queue_wait_seconds`), and
+  `vortex_inference_time_per_output_token_seconds`, the average gap between
+  the tokens after the first.
 
 ### Chat completions
 

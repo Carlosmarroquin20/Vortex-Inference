@@ -70,6 +70,7 @@ from app.metrics import (
     INFERENCE_REQUESTS_TOTAL,
     MODEL_LOAD_DURATION_SECONDS,
     QUEUE_WAIT_SECONDS,
+    TIME_PER_OUTPUT_TOKEN_SECONDS,
     TIME_TO_FIRST_TOKEN_SECONDS,
     TOKENS_GENERATED_TOTAL,
     TOKENS_PER_SECOND,
@@ -1003,11 +1004,25 @@ async def _run_streamed(
 
     return _ClosingStreamingResponse(
         _sse_body(
-            first, events, deadline, stop_event, request_start, chunks, include_usage
+            first,
+            events,
+            deadline,
+            stop_event,
+            _StreamTiming(enqueued_at=enqueued_at, request_start=request_start),
+            chunks,
+            include_usage,
         ),
         media_type="text/event-stream",
         headers=_STREAM_HEADERS,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamTiming:
+    # Arrival, for what the client experiences (time to first token), and
+    # permit acquisition, for engine time (duration), as on the buffered path.
+    enqueued_at: float
+    request_start: float
 
 
 async def _sse_body(
@@ -1015,10 +1030,11 @@ async def _sse_body(
     events: asyncio.Queue,
     deadline: float,
     stop_event: threading.Event,
-    request_start: float,
+    timing: _StreamTiming,
     chunks: _ChunkFormatter,
     include_usage: bool,
 ) -> AsyncIterator[str]:
+    request_start = timing.request_start
     outcome: str | None = None
     first_token_at: float | None = None
     event: StreamEvent | _StreamFailure = first
@@ -1030,17 +1046,29 @@ async def _sse_body(
             if isinstance(event, TextDelta):
                 if first_token_at is None:
                     first_token_at = time.monotonic()
-                    TIME_TO_FIRST_TOKEN_SECONDS.observe(first_token_at - request_start)
+                    TIME_TO_FIRST_TOKEN_SECONDS.observe(
+                        first_token_at - timing.enqueued_at
+                    )
                 yield _sse(chunks.text(event.text))
 
             elif isinstance(event, StreamEnd):
                 # Generation is complete at this point; a client that leaves
                 # while the trailer is sent does not turn it into a cancel.
                 outcome = "success"
-                duration = time.monotonic() - request_start
+                finished_at = time.monotonic()
+                duration = finished_at - request_start
                 tps = _record_usage(
                     event.tokens_prompt, event.tokens_completion, duration
                 )
+                # The first token's gap is part of time to first token, so
+                # the decode rate is measured over the tokens after it.
+                tpot = (
+                    (finished_at - first_token_at) / (event.tokens_completion - 1)
+                    if first_token_at is not None and event.tokens_completion >= 2
+                    else None
+                )
+                if tpot is not None:
+                    TIME_PER_OUTPUT_TOKEN_SECONDS.observe(tpot)
                 yield _sse(chunks.closing(event.finish_reason))
                 if include_usage:
                     yield _sse(chunks.usage(event))
@@ -1051,10 +1079,16 @@ async def _sse_body(
                     extra={
                         "streamed": True,
                         "duration_seconds": round(duration, 3),
+                        "queue_wait_seconds": round(
+                            request_start - timing.enqueued_at, 3
+                        ),
                         "time_to_first_token_seconds": (
-                            round(first_token_at - request_start, 3)
+                            round(first_token_at - timing.enqueued_at, 3)
                             if first_token_at is not None
                             else None
+                        ),
+                        "time_per_output_token_seconds": (
+                            round(tpot, 4) if tpot is not None else None
                         ),
                         "tokens_prompt": event.tokens_prompt,
                         "tokens_completion": event.tokens_completion,

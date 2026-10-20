@@ -42,13 +42,23 @@ QUEUE_WAIT_SECONDS = Histogram(
 
 TIME_TO_FIRST_TOKEN_SECONDS = Histogram(
     "vortex_inference_time_to_first_token_seconds",
-    "Streamed requests only: time from acquiring the inference permit to the "
-    "first text chunk. Queue wait is excluded, as in "
-    "vortex_inference_duration_seconds; the delay a client sees before the "
-    "first token is the sum of both. For local models it is dominated by "
-    "prompt processing, for remote backends by the network and the "
-    "provider's own queueing and thinking.",
+    "Streamed requests only: time from the request's arrival to its first text "
+    "chunk, i.e. the wait a client sees before output starts. It includes the "
+    "queue wait for a permit (vortex_inference_queue_wait_seconds), so a "
+    "rise with flat queue wait points at the engine: prompt processing for "
+    "local models, the network and the provider's own queueing and thinking "
+    "for remote backends.",
     buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, float("inf")],
+)
+
+TIME_PER_OUTPUT_TOKEN_SECONDS = Histogram(
+    "vortex_inference_time_per_output_token_seconds",
+    "Streamed requests only: average gap between output tokens after the "
+    "first, observed once per completed stream with at least two tokens. "
+    "This is the decode speed a reader experiences; its inverse is the "
+    "per-request tokens per second, without the prompt processing that "
+    "dominates time to first token.",
+    buckets=[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, float("inf")],
 )
 
 TOKENS_GENERATED_TOTAL = Counter(

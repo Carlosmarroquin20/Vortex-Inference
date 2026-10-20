@@ -378,3 +378,51 @@ def test_official_sdk_raises_on_a_failure_mid_stream(client, fake_model):
 
     with pytest.raises(openai.APIError, match="internal error"):
         list(stream)
+
+
+def test_time_to_first_token_includes_the_queue_wait():
+    ttft_sum = "vortex_inference_time_to_first_token_seconds_sum"
+    queue_sum = "vortex_inference_queue_wait_seconds_sum"
+
+    async def scenario():
+        async with main.lifespan(main.app):
+            fake = main.backend._model
+            fake.stream_pieces = [" a", " b"]
+            fake.step_delay = 0.2
+            ttft_before, queue_before = metric(ttft_sum), metric(queue_sum)
+
+            async def consume():
+                response = await create_completion(
+                    CompletionRequest(prompt="hi", stream=True)
+                )
+                return [chunk async for chunk in response.body_iterator]
+
+            # Serialized on the local model: the second waits ~0.4s for the
+            # first, and its client sees that wait before its first token.
+            await asyncio.gather(consume(), consume())
+            await drained()
+
+            queued = metric(queue_sum) - queue_before
+            assert queued >= 0.3
+            assert metric(ttft_sum) - ttft_before >= queued
+
+    asyncio.run(scenario())
+
+
+def test_time_per_output_token_is_the_decode_gap(client, fake_model):
+    tpot_count = "vortex_inference_time_per_output_token_seconds_count"
+    tpot_sum = "vortex_inference_time_per_output_token_seconds_sum"
+    fake_model.stream_pieces = [" a", " b", " c"]
+    fake_model.step_delay = 0.1
+    count_before, sum_before = metric(tpot_count), metric(tpot_sum)
+
+    stream(client)
+
+    assert metric(tpot_count) == count_before + 1
+    # Two gaps after the first token, ~0.1s each (bounds allow for the
+    # coarse Windows timer and scheduling noise).
+    assert 0.05 < metric(tpot_sum) - sum_before < 0.5
+
+    fake_model.stream_pieces, fake_model.step_delay = [" only"], 0.0
+    stream(client)
+    assert metric(tpot_count) == count_before + 1  # one token: no decode gap
