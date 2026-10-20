@@ -62,3 +62,17 @@ def client():
 def fake_model(client) -> FakeLlama:
     """The FakeLlama instance owned by the running application."""
     return main.backend._model
+
+
+@pytest.fixture
+def chat_backend(client, monkeypatch):
+    """
+    A llama.cpp backend whose model ships a chat template. The application
+    keeps its own template-less backend unless a test installs this one.
+    """
+    from app.backends.llamacpp import LlamaCppBackend
+
+    monkeypatch.setattr(FakeLlama, "chat_template", "{{ messages }}")
+    monkeypatch.setattr(FakeChatFormatter, "instances", [])
+    monkeypatch.setattr(FakeChatFormatter, "render_error", None)
+    return LlamaCppBackend(main.settings)

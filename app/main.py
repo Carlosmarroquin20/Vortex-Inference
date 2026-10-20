@@ -50,6 +50,7 @@ from app.backends import (
     BackendError,
     GenerationResult,
     InferenceBackend,
+    Prompt,
     PromptTooLongError,
     RequestRejectedError,
     StreamEnd,
@@ -74,6 +75,10 @@ from app.metrics import (
     TOKENS_PER_SECOND,
 )
 from app.schemas import (
+    ChatCompletionChoice,
+    ChatCompletionMessage,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
     CompletionChoice,
     CompletionPerformance,
     CompletionRequest,
@@ -521,6 +526,65 @@ async def create_completion(
     )
 
 
+@app.post(
+    "/v1/chat/completions",
+    response_model=ChatCompletionResponse,
+    responses={200: {"content": {"text/event-stream": {}}}},
+    tags=["inference"],
+    dependencies=[Depends(require_api_key)],
+)
+async def create_chat_completion(
+    request: ChatCompletionRequest,
+) -> ChatCompletionResponse | StreamingResponse:
+    """
+    Chat completion, buffered or streamed, in OpenAI's chat.completion
+    format. The conversation is formatted by the backend: with the model's
+    own chat template for llama_cpp, or by the provider's chat API.
+    """
+    _require_engine()
+    generation = _Generation(
+        prompt=request.conversation(),
+        max_tokens=request.completion_limit(),
+        temperature=request.temperature,
+        top_p=request.top_p,
+        stop=request.stop_sequences(),
+    )
+    completion_id = f"chatcmpl-{_request_id()}"
+
+    if request.stream:
+        return await _run_streamed(
+            generation,
+            _ChatChunks(completion_id, settings.model_name),
+            include_usage=bool(
+                request.stream_options and request.stream_options.include_usage
+            ),
+        )
+
+    done = await _run_buffered(generation)
+    result = done.result
+    return ChatCompletionResponse(
+        id=completion_id,
+        created=int(time.time()),
+        model=settings.model_name,
+        choices=[
+            ChatCompletionChoice(
+                index=0,
+                message=ChatCompletionMessage(content=result["text"]),
+                finish_reason=result["finish_reason"],
+            )
+        ],
+        usage=CompletionUsage(
+            prompt_tokens=result["tokens_prompt"],
+            completion_tokens=result["tokens_completion"],
+            total_tokens=result["tokens_prompt"] + result["tokens_completion"],
+        ),
+        performance=CompletionPerformance(
+            tokens_per_second=round(done.tokens_per_second, 3),
+            duration_seconds=round(done.duration, 3),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Running a generation
 # ---------------------------------------------------------------------------
@@ -538,7 +602,7 @@ async def create_completion(
 class _Generation:
     """What a request asks the backend for, independent of its endpoint."""
 
-    prompt: str
+    prompt: Prompt
     max_tokens: int
     temperature: float
     top_p: float
@@ -770,6 +834,51 @@ class _CompletionChunks:
 
     def closing(self, finish_reason: str | None) -> dict:
         return self._chunk([self._choice("", finish_reason)])
+
+    def usage(self, end: StreamEnd) -> dict:
+        return self._chunk([], usage=_usage(end))
+
+
+class _ChatChunks:
+    """
+    OpenAI chat.completion.chunk chunks, for /v1/chat/completions.
+
+    As in OpenAI's stream, the first chunk announces the assistant role with
+    empty content and the last one carries the finish reason with an empty
+    delta; clients rely on both.
+    """
+
+    def __init__(self, completion_id: str, model: str) -> None:
+        self._id = completion_id
+        self._model = model
+        self._created = int(time.time())
+
+    def _chunk(self, choices: list[dict], **extra: object) -> dict:
+        return {
+            "id": self._id,
+            "object": "chat.completion.chunk",
+            "created": self._created,
+            "model": self._model,
+            "choices": choices,
+            **extra,
+        }
+
+    def _choice(self, delta: dict, finish_reason: str | None) -> dict:
+        return {
+            "index": 0,
+            "delta": delta,
+            "logprobs": None,
+            "finish_reason": finish_reason,
+        }
+
+    def opening(self) -> list[dict]:
+        return [self._chunk([self._choice({"role": "assistant", "content": ""}, None)])]
+
+    def text(self, text: str) -> dict:
+        return self._chunk([self._choice({"content": text}, None)])
+
+    def closing(self, finish_reason: str | None) -> dict:
+        return self._chunk([self._choice({}, finish_reason)])
 
     def usage(self, end: StreamEnd) -> dict:
         return self._chunk([], usage=_usage(end))

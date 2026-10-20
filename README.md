@@ -16,7 +16,7 @@ A production-grade MLOps platform for serving specialized Small Language Models 
                      │  └─────────────┘      │  llama-cpp-python)    │  │
                      │                       │                       │  │
                      │                       │  ┌─────────────────┐  │  │
-                     │                       │  │ /v1/completions  │  │  │
+                     │                       │  │ /v1/*completions │  │  │
                      │                       │  │ /health          │  │  │
                      │                       │  │ /metrics ──────────────────►  Prometheus
                      │                       │  └─────────────────┘  │  │
@@ -186,6 +186,41 @@ for chunk in client.completions.create(
   `vortex_inference_time_to_first_token_seconds` (from permit to first chunk;
   queue wait is in `vortex_inference_queue_wait_seconds`).
 
+### Chat completions
+
+`/v1/chat/completions` takes a conversation in OpenAI's format and returns a
+`chat.completion` object, or `chat.completion.chunk` events with
+`"stream": true`. It shares the deadline, concurrency limit, metrics and error
+handling of `/v1/completions`.
+
+```python
+reply = client.chat.completions.create(
+    model="phi-3-mini-4k-instruct",
+    messages=[
+        {"role": "system", "content": "You answer in one short sentence."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ],
+    max_tokens=60,
+)
+print(reply.choices[0].message.content)
+```
+
+- **How the conversation is formatted.** `llama_cpp` applies the chat template
+  embedded in the GGUF file, the one the model was trained with. On
+  Qwen2.5-0.5B-Instruct the output and the prompt token count matched
+  llama-cpp-python's own `create_chat_completion` exactly, buffered and
+  streamed. A model without a template answers 400; use `/v1/completions` with
+  a prompt in its own format. Remote backends pass the conversation to the
+  provider's chat API; for `anthropic`, system messages become the Messages
+  API's `system` field.
+- **Accepted input.** Roles `system`, `developer` (treated as `system`), `user`
+  and `assistant`; `content` as a string or a list of text parts. `stop` may be
+  a string or a list; `max_completion_tokens` takes precedence over
+  `max_tokens`. Tools, images, `n > 1`, `response_format` and other unsupported
+  parameters are rejected with 422 rather than ignored.
+- **Limits.** Up to 256 messages, 32,768 characters per message and 65,536 in
+  total.
+
 ---
 
 ## Inference Backends
@@ -353,7 +388,7 @@ sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m])) / sum(ra
 ```
 vortex-inference/
 ├── app/
-│   ├── main.py               # FastAPI server — lifecycle, endpoints, request execution
+│   ├── main.py               # FastAPI server — lifecycle, both endpoints, request execution
 │   ├── schemas.py            # OpenAI-compatible request and response models
 │   ├── metrics.py            # Prometheus metric definitions
 │   ├── config.py             # Pydantic Settings — all tunables via env vars

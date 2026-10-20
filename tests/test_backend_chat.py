@@ -9,9 +9,8 @@ import pytest
 import app.main as main
 from app.backends import PromptTooLongError, RequestRejectedError, StreamEnd
 from app.backends.anthropic_api import AnthropicBackend
-from app.backends.llamacpp import LlamaCppBackend
 from app.backends.openai_compatible import OpenAICompatibleBackend
-from tests.fakes import EOS_ID, FakeChatFormatter, FakeLlama
+from tests.fakes import EOS_ID, FakeChatFormatter
 from tests.test_anthropic_backend import anthropic_settings, message_reply
 from tests.test_backend_streaming import chat_chunk, collect, sse, sse_response
 from tests.test_openai_compatible import chat_reply, remote_settings
@@ -20,15 +19,6 @@ CONVERSATION = [
     {"role": "system", "content": "Be brief."},
     {"role": "user", "content": "Capital of France?"},
 ]
-
-
-@pytest.fixture
-def chat_backend(client, monkeypatch) -> LlamaCppBackend:
-    """A llama.cpp backend whose model ships a chat template."""
-    monkeypatch.setattr(FakeLlama, "chat_template", "{{ messages }}")
-    monkeypatch.setattr(FakeChatFormatter, "instances", [])
-    monkeypatch.setattr(FakeChatFormatter, "render_error", None)
-    return LlamaCppBackend(main.settings)
 
 
 class Upstream:
