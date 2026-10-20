@@ -188,11 +188,14 @@ dashboard:
 		| kubectl label --local -f - grafana_dashboard=1 -o yaml \
 		| kubectl apply -f -
 
+# The provider key check comes first so a remote deploy that cannot succeed
+# fails before creating anything.
+#
 # kubectl apply never deletes objects that are absent from its input, so the
 # local profile removes the remote profile's egress policy explicitly; left
 # behind, it would keep egress open for pods that should have none. It is
 # removed before the apply so the local pods never start with it in place.
-deploy: api-key dashboard $(if $(filter remote,$(PROFILE)),require-provider-key)
+deploy: $(if $(filter remote,$(PROFILE)),require-provider-key) api-key dashboard
 	@printf "$(GREEN)[deploy]$(NC) Applying profile $(PROFILE) ($(KUSTOMIZE_DIR)) to namespace $(NAMESPACE)...\n"
 ifeq ($(PROFILE),local)
 	@kubectl delete networkpolicy vortex-inference-allow-provider-egress \

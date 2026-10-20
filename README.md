@@ -226,7 +226,7 @@ The manifests are a Kustomize base plus overlays, selected with `PROFILE`:
 | Profile | Directory | What it deploys |
 |---|---|---|
 | `local` (default) | `k8s/base` | `llama_cpp` with the GGUF model on a PersistentVolume, 2 CPU / 2–4Gi pods, no egress |
-| `remote` | `k8s/overlays/remote` | A remote backend (Claude by default), no model volume, 250m / 256–512Mi pods, 16 concurrent requests per pod, egress limited to DNS and HTTPS |
+| `remote` | `k8s/overlays/remote` | A remote backend (Claude by default), no model volume, 250m CPU / 128–512Mi pods, 16 concurrent requests per pod, egress limited to DNS and HTTPS |
 
 ```bash
 make build                       # same image for both profiles

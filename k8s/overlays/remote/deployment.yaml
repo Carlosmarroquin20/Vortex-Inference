@@ -24,22 +24,26 @@ spec:
               optional: false
 
         # The process holds no model: the Python runtime, the HTTP clients and
-        # in-flight request buffers. Requests are what the scheduler reserves;
-        # the CPU limit leaves room for TLS and JSON work under bursts.
+        # in-flight request buffers. Measured on minikube at 53Mi idle, so the
+        # request leaves room for concurrent requests and the limit for bursts;
+        # the CPU limit covers TLS and JSON work under load.
         resources:
           requests:
-            memory: "256Mi"
+            memory: "128Mi"
             cpu: "250m"
           limits:
             memory: "512Mi"
             cpu: "1"
 
-        # Startup takes seconds rather than the minutes a model load needs,
-        # so readiness is checked from the start and the budget is shorter.
+        # There is no model to load, so readiness is checked from the start.
+        # Measured on minikube: ready 6s after creation on a settled node, but
+        # close to 60s while the node was starting the monitoring stack at the
+        # same time, mostly in Python imports throttled by the CPU limit. The
+        # budget allows twice that before the kubelet restarts the container.
         startupProbe:
           initialDelaySeconds: 2
           periodSeconds: 2
-          failureThreshold: 30  # 60s total startup budget
+          failureThreshold: 60  # 120s total startup budget
 
         volumeMounts:
         - mountPath: /models
