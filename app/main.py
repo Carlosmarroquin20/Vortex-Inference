@@ -24,16 +24,19 @@ Concurrency model:
 """
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hmac
+import json
 import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import uvicorn
@@ -46,14 +49,18 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, Field, StringConstraints
-from starlette.responses import Response
+from pydantic import BaseModel, Field, StringConstraints, model_validator
+from starlette.responses import Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app.backends import (
     BackendError,
     InferenceBackend,
     PromptTooLongError,
     RequestRejectedError,
+    StreamEnd,
+    StreamEvent,
+    TextDelta,
     create_backend,
 )
 from app.config import Settings
@@ -108,6 +115,17 @@ QUEUE_WAIT_SECONDS = Histogram(
     "Sustained growth here with flat inference duration means the pod is "
     "saturated and KEDA should be adding replicas.",
     buckets=[0.01, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
+)
+
+TIME_TO_FIRST_TOKEN_SECONDS = Histogram(
+    "vortex_inference_time_to_first_token_seconds",
+    "Streamed requests only: time from acquiring the inference permit to the "
+    "first text chunk. Queue wait is excluded, as in "
+    "vortex_inference_duration_seconds; the delay a client sees before the "
+    "first token is the sum of both. For local models it is dominated by "
+    "prompt processing, for remote backends by the network and the "
+    "provider's own queueing and thinking.",
+    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, float("inf")],
 )
 
 TOKENS_GENERATED_TOTAL = Counter(
@@ -167,28 +185,36 @@ _inference_executor: ThreadPoolExecutor | None = None
 _drain_tasks: set[asyncio.Task[None]] = set()
 
 
-async def _drain_and_release(fut: asyncio.Future, sem: asyncio.Semaphore) -> None:
+async def _drain_and_release(
+    fut: asyncio.Future, sem: asyncio.Semaphore, abandoned: bool
+) -> None:
     """
-    Waits for an abandoned inference thread to exit, then releases its permit.
+    Waits for an inference thread to exit, then releases its permit.
 
     The permit must outlive the request that abandoned the thread: releasing
     it earlier would let the next queued request enter the backend (for
     llama.cpp, a non-thread-safe model) concurrently with the call that is
-    still unwinding.
+    still unwinding. Streamed requests always release this way, since their
+    thread can outlive the response whether or not it was abandoned.
     """
     try:
         await fut
     except Exception:
         # The client has already been answered; the failure is only worth logging.
-        logger.exception("Abandoned inference thread raised while draining.")
+        logger.exception("Inference thread raised while draining.")
     finally:
         sem.release()
         INFERENCE_ACTIVE_REQUESTS.dec()
-        logger.info("Abandoned inference thread drained. Semaphore released.")
+        if abandoned:
+            logger.info("Abandoned inference thread drained. Semaphore released.")
 
 
-def _hand_off_permit(fut: asyncio.Future, sem: asyncio.Semaphore) -> None:
-    task = asyncio.get_running_loop().create_task(_drain_and_release(fut, sem))
+def _hand_off_permit(
+    fut: asyncio.Future, sem: asyncio.Semaphore, abandoned: bool = True
+) -> None:
+    task = asyncio.get_running_loop().create_task(
+        _drain_and_release(fut, sem, abandoned)
+    )
     _drain_tasks.add(task)
     task.add_done_callback(_drain_tasks.discard)
 
@@ -341,6 +367,13 @@ async def require_api_key(
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
+class StreamOptions(BaseModel):
+    # Sends one extra chunk before [DONE] with usage and no choices.
+    include_usage: bool = False
+
+    model_config = {"extra": "forbid"}
+
+
 class CompletionRequest(BaseModel):
     # Accepted because the OpenAI SDKs always send it. The server hosts a
     # single model, so the value is not used for routing.
@@ -355,14 +388,21 @@ class CompletionRequest(BaseModel):
     stop: (
         list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
     ) = Field(default=None, max_length=4)
-    # Streaming is not implemented. Declared explicitly so stream=true fails
-    # with a field-level validation error rather than a generic
-    # "extra inputs are not permitted".
-    stream: Literal[False] = False
+    # stream=true answers with server-sent events in OpenAI's chunk format.
+    stream: bool = False
+    stream_options: StreamOptions | None = None
 
     model_config = {"extra": "forbid"}
     # extra="forbid" prevents prompt injection via undocumented parameters
     # that could be processed by future versions of the model loader.
+
+    @model_validator(mode="after")
+    def stream_options_require_stream(self) -> "CompletionRequest":
+        # Matches OpenAI, which rejects stream_options on a buffered request
+        # instead of silently ignoring it.
+        if self.stream_options is not None and not self.stream:
+            raise ValueError("stream_options is only allowed when stream is true.")
+        return self
 
 
 class CompletionChoice(BaseModel):
@@ -425,6 +465,75 @@ _BACKEND_ERROR_DETAIL = {
     503: "The inference backend is overloaded. Retry later.",
     504: "The inference backend did not respond in time.",
 }
+
+
+def _timeout_detail() -> str:
+    return (
+        f"Inference exceeded {settings.inference_timeout_seconds}s timeout. "
+        "Reduce max_tokens or retry when the service has scaled out."
+    )
+
+
+def _classify_failure(exc: Exception) -> tuple[str, HTTPException]:
+    """
+    Maps a backend failure to its metric outcome and client response, and
+    logs it. Shared by buffered and streamed requests, so a failure is
+    reported the same way whichever the client asked for.
+    """
+    if isinstance(exc, RequestRejectedError):
+        # A client error, not a service failure: counted separately so it
+        # does not inflate the error-ratio SLO.
+        details = (
+            {"tokens_prompt": exc.prompt_tokens, "n_ctx": exc.n_ctx}
+            if isinstance(exc, PromptTooLongError)
+            else {}
+        )
+        logger.info("Request rejected.", extra={"reason": str(exc), **details})
+        return "rejected", HTTPException(status_code=400, detail=str(exc))
+
+    if isinstance(exc, BackendError):
+        # Upstream timeouts share the "timeout" status with local deadline
+        # overruns so the latency SLO sees both.
+        outcome = "timeout" if exc.status_code == 504 else "error"
+        logger.error(
+            "Inference backend failed.",
+            extra={"reason": str(exc), "status_code": exc.status_code},
+        )
+        headers = (
+            {"Retry-After": exc.retry_after}
+            if exc.status_code == 503 and exc.retry_after
+            else None
+        )
+        return outcome, HTTPException(
+            status_code=exc.status_code,
+            detail=_BACKEND_ERROR_DETAIL.get(
+                exc.status_code, _BACKEND_ERROR_DETAIL[502]
+            ),
+            headers=headers,
+        )
+
+    # Full traceback goes to the server log only. Exception messages from
+    # llama.cpp and the OS routinely include file paths and allocator state,
+    # which should not be returned to API clients.
+    logger.error("Inference failed.", exc_info=exc)
+    return "error", HTTPException(
+        status_code=500, detail="Inference failed due to an internal error."
+    )
+
+
+def _record_outcome(outcome: str, request_start: float) -> None:
+    INFERENCE_REQUESTS_TOTAL.labels(status=outcome).inc()
+    INFERENCE_DURATION_SECONDS.labels(status=outcome).observe(
+        time.monotonic() - request_start
+    )
+
+
+def _record_usage(tokens_prompt: int, tokens_completion: int, duration: float) -> float:
+    tps = tokens_completion / duration if duration > 0 else 0.0
+    TOKENS_GENERATED_TOTAL.labels(type="prompt").inc(tokens_prompt)
+    TOKENS_GENERATED_TOTAL.labels(type="completion").inc(tokens_completion)
+    TOKENS_PER_SECOND.set(tps)
+    return tps
 
 
 def _inference_stalled() -> bool:
@@ -508,10 +617,13 @@ async def prometheus_metrics() -> Response:
 @app.post(
     "/v1/completions",
     response_model=CompletionResponse,
+    responses={200: {"content": {"text/event-stream": {}}}},
     tags=["inference"],
     dependencies=[Depends(require_api_key)],
 )
-async def create_completion(request: CompletionRequest) -> CompletionResponse:
+async def create_completion(
+    request: CompletionRequest,
+) -> CompletionResponse | StreamingResponse:
     """
     Primary inference endpoint. Path mirrors the OpenAI API for drop-in
     client compatibility without requiring SDK changes.
@@ -528,6 +640,9 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     """
     if backend is None or _inference_semaphore is None or _inference_executor is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
+
+    if request.stream:
+        return await _stream_completion(request)
 
     # Increment before acquiring the semaphore so queued requests contribute to
     # the KEDA scaling signal. Do NOT move this inside the semaphore.
@@ -615,25 +730,14 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
                     "max_tokens": request.max_tokens,
                 },
             )
-            timeout_s = settings.inference_timeout_seconds
-            raise HTTPException(
-                status_code=504,
-                detail=(
-                    f"Inference exceeded {timeout_s}s timeout. "
-                    "Reduce max_tokens or retry when the service has scaled out."
-                ),
-            ) from exc
+            raise HTTPException(status_code=504, detail=_timeout_detail()) from exc
 
         duration = time.monotonic() - request_start
-        tps = result["tokens_completion"] / duration if duration > 0 else 0.0
-
         outcome = "success"
         INFERENCE_REQUESTS_TOTAL.labels(status="success").inc()
-        TOKENS_GENERATED_TOTAL.labels(type="prompt").inc(result["tokens_prompt"])
-        TOKENS_GENERATED_TOTAL.labels(type="completion").inc(
-            result["tokens_completion"]
+        tps = _record_usage(
+            result["tokens_prompt"], result["tokens_completion"], duration
         )
-        TOKENS_PER_SECOND.set(tps)
 
         logger.info(
             "Inference complete.",
@@ -673,51 +777,10 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
     except HTTPException:
         raise
 
-    except RequestRejectedError as exc:
-        # A client error, not a service failure: counted separately so it does
-        # not inflate the error-ratio SLO.
-        outcome = "rejected"
-        INFERENCE_REQUESTS_TOTAL.labels(status="rejected").inc()
-        details = (
-            {"tokens_prompt": exc.prompt_tokens, "n_ctx": exc.n_ctx}
-            if isinstance(exc, PromptTooLongError)
-            else {}
-        )
-        logger.info("Request rejected.", extra={"reason": str(exc), **details})
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    except BackendError as exc:
-        # Upstream timeouts share the "timeout" status with local deadline
-        # overruns so the latency SLO sees both.
-        outcome = "timeout" if exc.status_code == 504 else "error"
-        INFERENCE_REQUESTS_TOTAL.labels(status=outcome).inc()
-        logger.error(
-            "Inference backend failed.",
-            extra={"reason": str(exc), "status_code": exc.status_code},
-        )
-        headers = (
-            {"Retry-After": exc.retry_after}
-            if exc.status_code == 503 and exc.retry_after
-            else None
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=_BACKEND_ERROR_DETAIL.get(
-                exc.status_code, _BACKEND_ERROR_DETAIL[502]
-            ),
-            headers=headers,
-        ) from exc
-
     except Exception as exc:
-        outcome = "error"
-        INFERENCE_REQUESTS_TOTAL.labels(status="error").inc()
-        # Full traceback goes to the server log only. Exception messages from
-        # llama.cpp and the OS routinely include file paths and allocator
-        # state, which should not be returned to API clients.
-        logger.exception("Inference failed.")
-        raise HTTPException(
-            status_code=500, detail="Inference failed due to an internal error."
-        ) from exc
+        outcome, http_exc = _classify_failure(exc)
+        INFERENCE_REQUESTS_TOTAL.labels(status=outcome).inc()
+        raise http_exc from exc
 
     finally:
         if request_start is not None and outcome is not None:
@@ -733,6 +796,276 @@ async def create_completion(request: CompletionRequest) -> CompletionResponse:
             if _semaphore_acquired:
                 _inference_semaphore.release()
             INFERENCE_ACTIVE_REQUESTS.dec()
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+# A streamed request holds its permit for the whole generation, exactly like a
+# buffered one: the worker thread drives the backend's generator and passes
+# each event to the event loop through a queue, and the permit is released
+# only when that thread exits. The response is committed (status 200, SSE
+# headers) only after the first event arrives, so failures that happen before
+# any output (a prompt that does not fit, an upstream 429) still get their
+# proper status code. After that, a failure can only end the stream with an
+# error event, which is what OpenAI's clients expect.
+
+_STREAM_HEADERS = {
+    # Proxies must pass events through as they are produced, not buffer the
+    # response; X-Accel-Buffering is the nginx ingress spelling of that.
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamFailure:
+    """An exception raised in the worker thread, carried to the event loop."""
+
+    exc: Exception
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """
+    StreamingResponse that always closes its body iterator.
+
+    Starlette stops iterating when the client disconnects but leaves the
+    generator suspended, so its cleanup (which stops generation and records
+    the outcome) would run whenever the garbage collector finalizes it.
+    Closing it here makes that cleanup immediate and deterministic.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.body_iterator.aclose()
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _sse_error(exc: HTTPException) -> str:
+    # The shape OpenAI uses for errors inside a stream; its SDKs raise an
+    # APIError when they read it.
+    error_type = "invalid_request_error" if exc.status_code < 500 else "server_error"
+    return _sse(
+        {"error": {"message": exc.detail, "type": error_type, "code": exc.status_code}}
+    )
+
+
+async def _next_event(
+    events: asyncio.Queue, deadline: float
+) -> StreamEvent | _StreamFailure:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return await asyncio.wait_for(events.get(), timeout=remaining)
+
+
+async def _stream_completion(request: CompletionRequest) -> StreamingResponse:
+    """Serves a completion as server-sent events in OpenAI's chunk format."""
+    # Counted while queued, as for buffered requests: this is KEDA's signal.
+    INFERENCE_ACTIVE_REQUESTS.inc()
+    enqueued_at = time.monotonic()
+    try:
+        await _inference_semaphore.acquire()
+    except BaseException:
+        INFERENCE_ACTIVE_REQUESTS.dec()
+        raise
+    request_start = time.monotonic()
+    QUEUE_WAIT_SECONDS.observe(request_start - enqueued_at)
+    # One deadline for the whole stream, measured like the buffered timeout,
+    # so a stream cannot hold the permit longer than a buffered request.
+    deadline = request_start + settings.inference_timeout_seconds
+
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[StreamEvent | _StreamFailure] = asyncio.Queue()
+    stop_event = threading.Event()
+
+    def produce() -> None:
+        # Runs in the worker thread. The backend's generator is created,
+        # consumed and closed here, so all of its code runs in the thread that
+        # holds the permit, whether it completes, fails, or the request is
+        # abandoned (stop_event).
+        try:
+            source = backend.stream(
+                request.prompt,
+                request.max_tokens,
+                request.temperature,
+                request.top_p,
+                request.stop,
+                stop_event,
+            )
+            with contextlib.closing(source):
+                for event in source:
+                    loop.call_soon_threadsafe(events.put_nowait, event)
+                    if stop_event.is_set():
+                        return
+        except Exception as exc:
+            loop.call_soon_threadsafe(events.put_nowait, _StreamFailure(exc))
+
+    # Context is copied so log lines from the worker keep the request ID.
+    ctx = contextvars.copy_context()
+    fut = loop.run_in_executor(_inference_executor, functools.partial(ctx.run, produce))
+    _hand_off_permit(fut, _inference_semaphore, abandoned=False)
+
+    try:
+        first = await _next_event(events, deadline)
+    except TimeoutError as exc:
+        stop_event.set()
+        _record_outcome("timeout", request_start)
+        logger.error(
+            "Inference produced no output before its deadline.",
+            extra={"timeout_seconds": settings.inference_timeout_seconds},
+        )
+        raise HTTPException(status_code=504, detail=_timeout_detail()) from exc
+    except asyncio.CancelledError:
+        stop_event.set()
+        _record_outcome("cancelled", request_start)
+        logger.warning("Streamed inference cancelled before its first output.")
+        raise
+
+    if isinstance(first, _StreamFailure):
+        outcome, http_exc = _classify_failure(first.exc)
+        _record_outcome(outcome, request_start)
+        raise http_exc from first.exc
+
+    include_usage = bool(
+        request.stream_options and request.stream_options.include_usage
+    )
+    completion_id = f"cmpl-{request_id_var.get() or uuid.uuid4().hex}"
+    return _ClosingStreamingResponse(
+        _sse_body(
+            first,
+            events,
+            deadline,
+            stop_event,
+            request_start,
+            completion_id,
+            include_usage,
+        ),
+        media_type="text/event-stream",
+        headers=_STREAM_HEADERS,
+    )
+
+
+async def _sse_body(
+    first: StreamEvent,
+    events: asyncio.Queue,
+    deadline: float,
+    stop_event: threading.Event,
+    request_start: float,
+    completion_id: str,
+    include_usage: bool,
+) -> AsyncIterator[str]:
+    created = int(time.time())
+
+    def chunk(text: str, finish_reason: str | None) -> str:
+        return _sse(
+            {
+                "id": completion_id,
+                "object": "text_completion",
+                "created": created,
+                "model": settings.model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": text,
+                        "logprobs": None,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
+        )
+
+    outcome: str | None = None
+    first_token_at: float | None = None
+    event: StreamEvent | _StreamFailure = first
+    try:
+        while True:
+            if isinstance(event, TextDelta):
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                    TIME_TO_FIRST_TOKEN_SECONDS.observe(first_token_at - request_start)
+                yield chunk(event.text, None)
+
+            elif isinstance(event, StreamEnd):
+                # Generation is complete at this point; a client that leaves
+                # while the trailer is sent does not turn it into a cancel.
+                outcome = "success"
+                duration = time.monotonic() - request_start
+                tps = _record_usage(
+                    event.tokens_prompt, event.tokens_completion, duration
+                )
+                yield chunk("", event.finish_reason)
+                if include_usage:
+                    yield _sse(
+                        {
+                            "id": completion_id,
+                            "object": "text_completion",
+                            "created": created,
+                            "model": settings.model_name,
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": event.tokens_prompt,
+                                "completion_tokens": event.tokens_completion,
+                                "total_tokens": event.tokens_prompt
+                                + event.tokens_completion,
+                            },
+                        }
+                    )
+                yield "data: [DONE]\n\n"
+
+                logger.info(
+                    "Inference complete.",
+                    extra={
+                        "streamed": True,
+                        "duration_seconds": round(duration, 3),
+                        "time_to_first_token_seconds": (
+                            round(first_token_at - request_start, 3)
+                            if first_token_at is not None
+                            else None
+                        ),
+                        "tokens_prompt": event.tokens_prompt,
+                        "tokens_completion": event.tokens_completion,
+                        "tokens_per_second": round(tps, 2),
+                        "finish_reason": event.finish_reason,
+                    },
+                )
+                return
+
+            else:
+                outcome, http_exc = _classify_failure(event.exc)
+                yield _sse_error(http_exc)
+                return
+
+            event = await _next_event(events, deadline)
+
+    except TimeoutError:
+        outcome = "timeout"
+        logger.error(
+            "Streamed inference exceeded its deadline. Worker thread signalled "
+            "to stop.",
+            extra={"timeout_seconds": settings.inference_timeout_seconds},
+        )
+        yield _sse_error(HTTPException(status_code=504, detail=_timeout_detail()))
+
+    except (asyncio.CancelledError, GeneratorExit):
+        # The client went away mid-stream. Nothing more can be sent; stopping
+        # generation and recording the outcome happen below.
+        if outcome is None:
+            outcome = "cancelled"
+            logger.warning("Client disconnected mid-stream. Worker thread signalled.")
+        raise
+
+    finally:
+        # Harmless once generation has ended; otherwise it stops the worker
+        # at the next token, and the drain task then releases the permit.
+        stop_event.set()
+        if outcome is not None:
+            _record_outcome(outcome, request_start)
 
 
 # ---------------------------------------------------------------------------

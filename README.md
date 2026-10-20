@@ -128,8 +128,8 @@ curl -X POST "http://${INFERENCE_IP}/v1/completions" \
 ```
 
 The response follows OpenAI's `text_completion` schema, so the official SDKs work
-unchanged (streaming is not supported). Server-side throughput is reported in an
-additional `performance` object.
+unchanged. Server-side throughput is reported in an additional `performance`
+object.
 
 ```python
 from openai import OpenAI
@@ -142,6 +142,49 @@ completion = client.completions.create(
 )
 print(completion.choices[0].text)
 ```
+
+### Streaming
+
+`"stream": true` returns server-sent events in OpenAI's chunk format, ending
+with `data: [DONE]`; `"stream_options": {"include_usage": true}` adds a final
+chunk with token usage. It works with every backend.
+
+```bash
+curl -N "http://${INFERENCE_IP}/v1/completions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -d '{"prompt": "Explain transformer attention:", "max_tokens": 200, "stream": true}'
+```
+
+```python
+for chunk in client.completions.create(
+    model="phi-3-mini-4k-instruct",
+    prompt="Explain transformer attention:",
+    max_tokens=200,
+    stream=True,
+):
+    print(chunk.choices[0].text, end="", flush=True)
+```
+
+- **Errors.** The response is committed only once the backend produces its
+  first event, so a failure before any output (prompt too long, upstream rate
+  limit, deadline) still returns the usual JSON error and status code. A
+  failure after that ends the stream with an `error` event and no `[DONE]`,
+  which the OpenAI SDKs raise as an `APIError`.
+- **Deadline.** `VORTEX_INFERENCE_TIMEOUT_SECONDS` bounds the whole stream, as
+  it bounds a buffered request.
+- **Disconnects.** When the client goes away, generation stops at the next
+  token (llama.cpp) or the upstream connection is closed (remote backends), and
+  the inference permit is released as soon as the worker thread exits.
+- **Refusals.** With the `anthropic` backend, a stream that ends with
+  `finish_reason: "content_filter"` was declined after some text had been sent;
+  that partial text should be discarded.
+- **Token counts.** For `llama_cpp` the library reports no usage when
+  streaming, so completion tokens are counted per returned chunk; that matches
+  the buffered count except when a multi-byte character spans several tokens.
+- **Time to first token** is recorded in
+  `vortex_inference_time_to_first_token_seconds` (from permit to first chunk;
+  queue wait is in `vortex_inference_queue_wait_seconds`).
 
 ---
 

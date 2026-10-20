@@ -78,13 +78,14 @@ def test_llama_streams_chunks_then_usage(fake_model):
     assert main.backend.busy_seconds() == 0.0
 
 
-def test_llama_empty_chunks_are_not_forwarded(fake_model):
+def test_llama_empty_chunks_count_but_are_not_forwarded(fake_model):
+    # A token that decodes to nothing on its own still consumed a step.
     fake_model.stream_pieces = ["", " hi", ""]
 
     deltas, end = collect(main.backend.stream("x", 8, 0.7, 0.95, None))
 
     assert deltas == [" hi"]
-    assert end.tokens_completion == 1
+    assert end.tokens_completion == 3
 
 
 def test_llama_prompt_too_long_raises_before_any_event(fake_model):

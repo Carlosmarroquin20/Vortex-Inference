@@ -76,7 +76,8 @@ def test_parameters_are_forwarded_to_the_model(client, fake_model):
         {"prompt": "hi", "stop": [""]},
         {"prompt": "hi", "stop": ["x" * 65]},
         {"prompt": "hi", "stop": ["a", "b", "c", "d", "e"]},
-        {"prompt": "hi", "stream": True},
+        {"prompt": "hi", "stream_options": {"include_usage": True}},
+        {"prompt": "hi", "stream": True, "stream_options": {"other": 1}},
         {"prompt": "hi", "unknown_field": 1},
     ],
     ids=[
@@ -88,7 +89,8 @@ def test_parameters_are_forwarded_to_the_model(client, fake_model):
         "empty-stop-sequence",
         "stop-sequence-too-long",
         "too-many-stop-sequences",
-        "streaming",
+        "stream-options-without-stream",
+        "unknown-stream-option",
         "unknown-field",
     ],
 )
