@@ -184,6 +184,31 @@ class JobProcessor:
                 extra={"reason": str(exc)},
             )
             return Decision("retry", "deferred", retry_attempt=1, message=message)
+        except Exception:
+            # A bug rather than a property of the job's input or the
+            # upstream. Requeueing is not an option: RabbitMQ 4 does not count
+            # a requeue towards the delivery limit, so the message would be
+            # redelivered forever. It is dead-lettered for inspection and the
+            # job marked failed, so the client gets an answer.
+            logger.exception("Job processing failed unexpectedly. Dead-lettering it.")
+            await self._fail_after_error(message.job_id)
+            return Decision("reject", "failed")
+
+    async def _fail_after_error(self, job_id: str) -> None:
+        try:
+            job = await self._store.get(job_id)
+            if job is not None and job.status not in ("succeeded", "failed"):
+                await self._finish_failed(
+                    job,
+                    JobError(
+                        status_code=500,
+                        message="The job failed due to an internal error.",
+                    ),
+                )
+        except Exception:
+            # The message is dead-lettered either way; the record then
+            # stays as it was until it expires.
+            logger.warning("Could not mark the job failed.", exc_info=True)
 
     async def _process(self, message: JobMessage) -> Decision:
         job = await self._store.get(message.job_id)

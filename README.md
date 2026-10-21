@@ -370,7 +370,9 @@ curl -s "http://${INFERENCE_IP}/v1/jobs/job_3f9c..." -H "Authorization: Bearer $
 - **Poison messages.** The quorum queue counts deliveries: a job delivered
   `VORTEX_JOB_MAX_ATTEMPTS` times without completing (its worker crashed each
   time) is marked failed and moves to the `vortex.jobs.dead` queue instead of
-  looping, as does a message the worker cannot parse.
+  looping, as does a message the worker cannot parse. A bug in processing
+  fails the job and dead-letters it on the first delivery: RabbitMQ 4 does
+  not count requeues towards the delivery limit, so requeueing would loop.
 - **Status values**: `queued`, `running`, `succeeded` (with `result`) and
   `failed` (with `error`: the status code and message the endpoint would have
   answered with).

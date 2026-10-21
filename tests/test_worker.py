@@ -245,6 +245,39 @@ def test_store_outage_defers_without_using_an_attempt():
     assert store.jobs[JOB_ID].attempts == 0
 
 
+def test_unexpected_error_fails_the_job_and_dead_letters_it():
+    class Malformed(FakeRunner):
+        async def run(self, generation):
+            # A result missing its fields breaks response building.
+            return Finished(result={}, duration=0.1, tokens_per_second=0.0)
+
+    store = stored(InMemoryJobStore())
+
+    decision = run(processor(store, Malformed()).process(body()))
+
+    assert decision == Decision("reject", "failed")
+    job = store.jobs[JOB_ID]
+    assert (job.status, job.error.status_code) == ("failed", 500)
+
+
+def test_unexpected_error_is_dead_lettered_even_if_the_record_cannot_be_updated():
+    class BrokenAfterFirstSave(InMemoryJobStore):
+        saves = 0
+
+        async def save(self, job):
+            self.saves += 1
+            if self.saves > 1:
+                raise RuntimeError("serializer bug")
+            await super().save(job)
+
+    store = stored(BrokenAfterFirstSave())
+
+    decision = run(processor(store, FakeRunner()).process(body()))
+
+    assert decision == Decision("reject", "failed")
+    assert store.jobs[JOB_ID].status == "running"
+
+
 def test_store_outage_after_the_run_defers_the_job():
     store = stored(InMemoryJobStore())
 
@@ -440,9 +473,18 @@ def test_retry_is_published_to_its_delay_queue_before_the_ack():
     assert ack == "ack"
 
 
-def test_handling_errors_requeue_the_message():
-    worker = make_worker(StaticProcessor(error=RuntimeError("bug")))
-    worker._channel = FakeChannel()
+def test_failed_settling_requeues_the_message():
+    decision = Decision(
+        "retry", "retried", retry_attempt=1, message=message_for_retry()
+    )
+    worker = make_worker(StaticProcessor(decision))
+    channel = FakeChannel()
+
+    async def broken_publish(*args, **kwargs):
+        raise ConnectionError("channel closed")
+
+    channel.default_exchange.publish = broken_publish
+    worker._channel = channel
     message = FakeMessage()
 
     run(worker._on_message(message))

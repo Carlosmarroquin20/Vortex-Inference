@@ -156,10 +156,12 @@ class Worker:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # A bug or a broker failure while settling. Requeued, so the
-            # delivery limit eventually dead-letters a message that keeps
-            # failing this way.
-            logger.exception("Job handling failed. Requeueing the message.")
+            # The processor handles its own failures, so this is settling
+            # that failed: the retry could not be published or the ack not
+            # sent, almost always because the channel is gone, in which case
+            # the broker has already requeued the message. The nack covers
+            # the rest; the job's record makes running it again safe.
+            logger.exception("Could not settle the message. Requeueing it.")
             with contextlib.suppress(Exception):
                 await message.nack(requeue=True)
         finally:
