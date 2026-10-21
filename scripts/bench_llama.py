@@ -64,7 +64,7 @@ def build_prompt(llm, tokens: int) -> list[int]:
 def measure(model: str, threads: int, threads_batch: int, batch: int, args) -> Result:
     from llama_cpp import Llama
 
-    started = time.monotonic()
+    started = time.perf_counter()
     llm = Llama(
         model_path=model,
         n_ctx=args.prompt_tokens + args.gen_tokens + 16,
@@ -75,7 +75,7 @@ def measure(model: str, threads: int, threads_batch: int, batch: int, args) -> R
         n_ubatch=batch,
         verbose=False,
     )
-    load_seconds = time.monotonic() - started
+    load_seconds = time.perf_counter() - started
     prompt = build_prompt(llm, args.prompt_tokens)
 
     prefill, decode = [], []
@@ -83,16 +83,16 @@ def measure(model: str, threads: int, threads_batch: int, batch: int, args) -> R
     # is not counted.
     for attempt in range(args.repeat + 1):
         llm.reset()
-        started = time.monotonic()
+        started = time.perf_counter()
         llm.eval(prompt)
-        prefill_seconds = time.monotonic() - started
+        prefill_seconds = time.perf_counter() - started
 
         # Decoding cost does not depend on which token is fed back, so the
         # last prompt token stands in for sampling.
-        started = time.monotonic()
+        started = time.perf_counter()
         for _ in range(args.gen_tokens):
             llm.eval([prompt[-1]])
-        decode_seconds = time.monotonic() - started
+        decode_seconds = time.perf_counter() - started
 
         if attempt > 0:
             prefill.append(len(prompt) / prefill_seconds)
