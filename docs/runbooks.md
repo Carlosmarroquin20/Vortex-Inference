@@ -197,3 +197,140 @@ memory limit together with the ResourceQuota and LimitRange in
 
 **Mitigation.** For OOM, see [PodHighMemoryUsage](#vortexinferencepodhighmemoryusage).
 For model load failures, see [NoReadyPods](#vortexinferencenoreadypods).
+
+---
+
+# Asynchronous jobs
+
+Jobs are queued in RabbitMQ (`vortex-rabbitmq`), tracked in Redis
+(`vortex-redis`) and run by `vortex-worker`, which KEDA scales from zero on the
+length of the `vortex.jobs` queue. A job's ID is also the `request_id` of every
+worker log line about it, so `kubectl logs -l app.kubernetes.io/name=vortex-worker
+-n vortex-inference | grep request_id=<job id>` follows one job.
+
+```bash
+kubectl describe scaledobject vortex-worker-scaler -n vortex-inference
+kubectl get pods -n vortex-inference -l app.kubernetes.io/part-of=vortex-inference
+kubectl exec -n vortex-inference vortex-rabbitmq-0 -- \
+  rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers
+```
+
+## VortexJobsDeadLettered
+
+**Meaning.** `vortex.jobs.dead` holds at least one message. A message lands
+there when the worker could not parse it, when processing it raised an
+unexpected error (the job is marked failed with a 500), or when it was
+delivered more than `VORTEX_JOB_MAX_ATTEMPTS` times without an
+acknowledgement, i.e. it kept killing its worker.
+
+**Impact.** Those jobs will not run again on their own. Clients polling them
+see `failed`, or `running` for a job whose worker died every time.
+
+**Diagnosis.**
+1. Look at the messages without removing them (`ackmode` requeues them):
+   ```bash
+   kubectl port-forward -n vortex-inference svc/vortex-rabbitmq 15672 &
+   # credentials: kubectl get secret vortex-inference-jobs -n vortex-inference \
+   #   -o jsonpath='{.data.rabbitmq-password}' | base64 -d
+   curl -u vortex:<password> -H 'content-type: application/json' \
+     -d '{"count":5,"ackmode":"reject_requeue_true","encoding":"auto"}' \
+     http://127.0.0.1:15672/api/queues/%2F/vortex.jobs.dead/get
+   ```
+   The `message_id` property is the job ID.
+2. Search the worker logs for that ID: `Job processing failed unexpectedly`
+   with a traceback is a bug; `Unreadable job message` is a message something
+   other than the API published; no log line at all, with restarts on the
+   worker pods, means the job crashed or OOM-killed its worker (see
+   [FrequentRestarts](#vortexinferencefrequentrestarts); the same diagnosis
+   applies to `vortex-worker` pods).
+
+**Mitigation.** Fix the cause first. Then either purge the queue
+(`rabbitmqctl purge_queue vortex.jobs.dead`) or move the messages back to
+`vortex.jobs` with a shovel (enabling `rabbitmq_shovel_management` adds a
+"Move messages" form to the queue's page in the management UI). A job that
+was marked failed stays failed, since the worker skips finished jobs; clients
+resubmit those. Records expire after `VORTEX_JOB_TTL_SECONDS`.
+
+## VortexJobsNotConsumed
+
+**Meaning.** `vortex.jobs` has had messages ready and no consumer for 10
+minutes.
+
+**Impact.** No job is making progress. Submissions still succeed, so the
+backlog keeps growing.
+
+**Diagnosis.**
+1. `kubectl describe scaledobject vortex-worker-scaler -n vortex-inference`:
+   `Ready` and `Active` conditions, and events. A scaler error usually means the
+   KEDA operator cannot reach the management API (the `vortex-rabbitmq`
+   NetworkPolicy admits only the `keda` namespace on port 15672) or the
+   `rabbitmq-management-url` in the `vortex-inference-jobs` Secret is wrong.
+2. `kubectl get deployment vortex-worker -n vortex-inference`: if replicas are
+   wanted but none are ready, check the pods' events for `FailedScheduling`
+   (quota or node capacity; workers run at the lowest priority and are the
+   first to stay Pending), image errors, or a failing startup probe (model
+   missing, RabbitMQ unreachable: the worker retries the connection and logs
+   `RabbitMQ unreachable. Retrying.`).
+
+**Mitigation.** Restore whatever step above failed. Messages are durable;
+nothing is lost while workers are down.
+
+## VortexJobsSlowToStart
+
+**Meaning.** The P95 time from a job's submission to its first attempt has
+been above 10 minutes for 15 minutes, while workers are running.
+
+**Impact.** Jobs finish late. This is a capacity signal, not a failure.
+
+**Diagnosis.** Compare queue depth with the worker count in the dashboard's
+Jobs row. Workers at `maxReplicaCount` with a growing queue mean too little
+capacity; workers below it mean KEDA cannot add pods (check events for
+`FailedScheduling`: on a full node the API's replicas take precedence).
+
+**Mitigation.** Raise `maxReplicaCount` in `k8s/base/worker.yaml` if the node
+has room, or `VORTEX_MAX_CONCURRENT_REQUESTS` for remote backends (and the
+scaler's `value` with it).
+
+## VortexJobSubmissionsFailing
+
+**Meaning.** `POST /v1/jobs` has been answering 503 for 5 minutes because the
+API cannot reach the job store (`component="store"`, Redis) or the queue
+(`component="queue"`, RabbitMQ). Logged as `Job store unavailable.` or
+`Job queue unavailable.` with the reason.
+
+**Impact.** Clients cannot submit jobs; they are told to retry
+(`Retry-After: 5`). Completions and reading existing jobs are unaffected for a
+queue outage; a store outage also fails `GET /v1/jobs/{id}`.
+
+**Diagnosis.**
+1. `kubectl get pods -n vortex-inference -l app.kubernetes.io/name=vortex-redis`
+   (or `vortex-rabbitmq`): restarts, readiness, events.
+2. RabbitMQ under a memory or disk alarm blocks publishers, and the API times
+   out waiting for the confirm: `rabbitmq-diagnostics alarms` in the pod.
+3. Redis refusing writes with `OOM command not allowed` has reached its
+   `maxmemory` (set to refuse rather than evict, see `k8s/base/redis.yaml`):
+   too many jobs within the TTL.
+
+**Mitigation.** Restart or resize the failing component. For a full Redis,
+lower `VORTEX_JOB_TTL_SECONDS` or raise `maxmemory` together with the
+container's memory limit.
+
+## Operating RabbitMQ and Redis
+
+**Rotating the RabbitMQ password.** RabbitMQ applies `RABBITMQ_DEFAULT_PASS`
+only on its first boot, so change it in the broker first, then in the Secret,
+then restart the clients:
+
+```bash
+kubectl exec -n vortex-inference vortex-rabbitmq-0 -- rabbitmqctl change_password vortex <new>
+kubectl delete secret vortex-inference-jobs -n vortex-inference
+# recreate it with the new RabbitMQ password and the current Redis one, then:
+kubectl rollout restart deployment/vortex-inference deployment/vortex-worker -n vortex-inference
+```
+
+**Changing `VORTEX_JOB_MAX_ATTEMPTS`.** It is the jobs queue's
+`x-delivery-limit`, which a quorum queue cannot change in place; the API and
+workers then fail to declare the queue (`PRECONDITION_FAILED`). Stop
+submissions, let the workers drain the queue, delete it
+(`rabbitmqctl delete_queue vortex.jobs`) and deploy the new value; the queue is
+recreated on first use.

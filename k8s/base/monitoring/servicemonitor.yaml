@@ -55,3 +55,68 @@ spec:
   namespaceSelector:
     matchNames:
     - vortex-inference
+
+---
+# RabbitMQ's rabbitmq_prometheus plugin. /metrics carries broker-wide series
+# (memory and disk alarms, connections); queue depths and consumer counts
+# are only on /metrics/detailed, limited here to the two metric families
+# the alerts and the dashboard read, for the default vhost. Per-object
+# metrics for every queue (/metrics/per-object) would cost more to produce
+# and store for data nothing uses.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vortex-rabbitmq
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-rabbitmq
+    app.kubernetes.io/component: monitoring
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-rabbitmq
+  endpoints:
+  - port: prometheus
+    path: /metrics
+    interval: 30s
+  - port: prometheus
+    path: /metrics/detailed
+    params:
+      family:
+      - queue_coarse_metrics
+      - queue_consumer_count
+      vhost:
+      - /
+    interval: 30s
+  namespaceSelector:
+    matchNames:
+    - vortex-inference
+
+---
+# Job workers have no Service (they serve no traffic), so they are scraped
+# per pod. While KEDA has scaled them to zero there is nothing to scrape;
+# the alerts on the jobs read RabbitMQ's queue metrics for that reason.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vortex-worker
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-worker
+    app.kubernetes.io/component: monitoring
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-worker
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: 15s
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+  namespaceSelector:
+    matchNames:
+    - vortex-inference

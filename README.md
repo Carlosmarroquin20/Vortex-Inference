@@ -435,6 +435,9 @@ Secret.
 - **Persistence.** RabbitMQ keeps its queues and Redis its append-only file on
   PersistentVolumeClaims; Redis refuses writes rather than evicting job
   records when it reaches `maxmemory`.
+- **Alerts** for the dead-letter queue, jobs nobody consumes, slow starts and
+  failing submissions, with runbooks in [docs/runbooks.md](docs/runbooks.md),
+  and an Asynchronous Jobs row in the Grafana dashboard.
 
 ## Load Testing
 

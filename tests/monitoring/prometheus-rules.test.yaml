@@ -63,3 +63,110 @@ tests:
       - eval_time: 15m
         alertname: VortexInferenceSlowTimeToFirstToken
         exp_alerts: []
+
+  # --- Asynchronous jobs -----------------------------------------------------
+
+  # One message reaches the dead-letter queue and stays there.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages{vhost="/",queue="vortex.jobs.dead"}'
+        values: "0 0 1x20"
+      # A busy jobs queue on its own is not a dead letter.
+      - series: 'rabbitmq_detailed_queue_messages{vhost="/",queue="vortex.jobs"}'
+        values: "5x22"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: VortexJobsDeadLettered
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: VortexJobsDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: mlops
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsdeadlettered"
+              summary: "Jobs are waiting in the dead-letter queue"
+              description: "1 message(s) in vortex.jobs.dead. Their jobs are marked failed or were interrupted on every attempt; inspect the messages and the worker logs for their job IDs before purging or requeueing.\n"
+
+  # Jobs queued with no consumer: pending through the 10m hold, then firing.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{vhost="/",queue="vortex.jobs"}'
+        values: "3x20"
+      - series: 'rabbitmq_detailed_queue_consumers{vhost="/",queue="vortex.jobs"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: VortexJobsNotConsumed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: VortexJobsNotConsumed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: mlops
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsnotconsumed"
+              summary: "Jobs are queued but no worker is consuming them"
+              description: "vortex.jobs has had ready messages and no consumers for 10m; no job is making progress. Check the worker ScaledObject and the vortex-worker pods.\n"
+
+  # A worker scaled up and consuming: a backlog alone does not alert here.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{vhost="/",queue="vortex.jobs"}'
+        values: "3x20"
+      - series: 'rabbitmq_detailed_queue_consumers{vhost="/",queue="vortex.jobs"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VortexJobsNotConsumed
+        exp_alerts: []
+
+  # Every job waits between 10 and 30 minutes (adjacent buckets) for its
+  # first attempt: the interpolated P95 is 600 + 1200 * 0.95 = 1740s.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_worker_job_wait_seconds_bucket{le="600.0"}'
+        values: "0+0x40"
+      - series: 'vortex_worker_job_wait_seconds_bucket{le="1800.0"}'
+        values: "0+2x40"
+      - series: 'vortex_worker_job_wait_seconds_bucket{le="+Inf"}'
+        values: "0+2x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: VortexJobsSlowToStart
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: VortexJobsSlowToStart
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: mlops
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsslowtostart"
+              summary: "Jobs wait more than 10 minutes before they start (P95)"
+              description: "P95 time from submission to first attempt is 1740s. The workers are at their maximum replica count or each one is saturated.\n"
+
+  # RabbitMQ unreachable from the API; Redis fine.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_job_submission_failures_total{component="queue"}'
+        values: "0+1x20"
+      - series: 'vortex_job_submission_failures_total{component="store"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: VortexJobSubmissionsFailing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: VortexJobSubmissionsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: mlops
+              component: queue
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsubmissionsfailing"
+              summary: "Job submissions are failing: queue unavailable"
+              description: "POST /v1/jobs has been answering 503 for 5m because the job queue (store is Redis, queue is RabbitMQ) cannot be reached. Check the vortex-redis and vortex-rabbitmq pods.\n"

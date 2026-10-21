@@ -301,11 +301,12 @@ jobs:
         # with the four required top-level fields, and each profile must
         # contain the expected number of each, which catches a patch or
         # resource list that dropped one. Expected counts: the API and the
-        # job workers each have a ScaledObject.
+        # job workers each have a ScaledObject, and RabbitMQ has its own
+        # ServiceMonitor next to the API's.
         run: |
           for profile in local remote; do
             rendered="${RUNNER_TEMP}/rendered/${profile}.yaml"
-            for expected in ScaledObject=2 TriggerAuthentication=1 ServiceMonitor=1 PrometheusRule=1; do
+            for expected in ScaledObject=2 TriggerAuthentication=1 ServiceMonitor=2 PodMonitor=1 PrometheusRule=1; do
               kind="${expected%=*}"
               want="${expected#*=}"
               count=$(yq eval-all "[select(.kind == \"${kind}\" and has(\"apiVersion\") and has(\"metadata\") and has(\"spec\"))] | length" "${rendered}")

@@ -253,3 +253,90 @@ spec:
           This pattern typically indicates OOM during model loading or a missing
           model file at the PVC mount path. Check pod logs:
           kubectl logs {{ $labels.pod }} -n vortex-inference --previous
+
+  # ---------------------------------------------------------------------------
+  # Asynchronous Jobs
+  # ---------------------------------------------------------------------------
+  # The workers scale to zero, so these alerts read the queues as RabbitMQ
+  # reports them (rabbitmq_detailed_*) and the API's submission counters,
+  # which exist whether or not a worker is running. Queue names follow
+  # VORTEX_JOBS_QUEUE in the ConfigMap.
+  - name: vortex.jobs
+    rules:
+    # A dead-lettered job will not run again on its own: it failed on a bug,
+    # could not be parsed, or kept killing its worker. Each one needs a
+    # look, so any message there alerts; the hold only rides out a scrape
+    # gap.
+    - alert: VortexJobsDeadLettered
+      expr: |
+        max(rabbitmq_detailed_queue_messages{queue="vortex.jobs.dead"}) > 0
+      for: 5m
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsdeadlettered"
+        summary: "Jobs are waiting in the dead-letter queue"
+        description: >
+          {{ $value }} message(s) in vortex.jobs.dead. Their jobs are marked
+          failed or were interrupted on every attempt; inspect the messages
+          and the worker logs for their job IDs before purging or requeueing.
+
+    # Jobs queued and nobody consuming: the workers cannot start (crash
+    # loop, missing model, quota) or KEDA is not scaling them up. Scaling
+    # from zero takes a polling interval plus the model load, well under the
+    # hold.
+    - alert: VortexJobsNotConsumed
+      expr: |
+        max(rabbitmq_detailed_queue_messages_ready{queue="vortex.jobs"}) > 0
+        and
+        max(rabbitmq_detailed_queue_consumers{queue="vortex.jobs"}) == 0
+      for: 10m
+      labels:
+        severity: critical
+        team: mlops
+      annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsnotconsumed"
+        summary: "Jobs are queued but no worker is consuming them"
+        description: >
+          vortex.jobs has had ready messages and no consumers for 10m; no job
+          is making progress. Check the worker ScaledObject and the
+          vortex-worker pods.
+
+    # Workers are running but cannot keep up: jobs wait longer than ten
+    # minutes for their first attempt. That is capacity, not failure; the
+    # usual answer is a higher maxReplicaCount or more concurrency per worker.
+    - alert: VortexJobsSlowToStart
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(vortex_worker_job_wait_seconds_bucket[15m])) by (le)
+        ) > 600
+      for: 15m
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsslowtostart"
+        summary: "Jobs wait more than 10 minutes before they start (P95)"
+        description: >
+          P95 time from submission to first attempt is
+          {{ printf "%.0f" $value }}s. The workers are at their maximum
+          replica count or each one is saturated.
+
+    # The API answers 503 to submissions because RabbitMQ or Redis is
+    # unreachable from it; component says which. Synchronous completions are
+    # unaffected, which is why this is a warning.
+    - alert: VortexJobSubmissionsFailing
+      expr: |
+        sum by (component) (rate(vortex_job_submission_failures_total[5m])) > 0
+      for: 5m
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsubmissionsfailing"
+        summary: "Job submissions are failing: {{ $labels.component }} unavailable"
+        description: >
+          POST /v1/jobs has been answering 503 for 5m because the job
+          {{ $labels.component }} (store is Redis, queue is RabbitMQ) cannot
+          be reached. Check the vortex-redis and vortex-rabbitmq pods.
