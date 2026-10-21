@@ -51,7 +51,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build api-key show-api-key provider-key require-provider-key grafana-password dashboard deploy undeploy status logs metrics test load-test loadgen tunnel clean
+.PHONY: help setup model build api-key show-api-key provider-key require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen tunnel clean
 
 # =============================================================================
 # Default target — always show help first
@@ -81,6 +81,7 @@ help:
 	@printf "    make test        Send a single inference request to verify the stack\n"
 	@printf "    make load-test   Run concurrent requests to trigger KEDA scale-out\n"
 	@printf "    make loadgen     Measure client-side latency (TTFT, TPOT); see LOADGEN_ARGS\n"
+	@printf "    make test-integration  Run the jobs tests against RabbitMQ and Redis in Docker\n"
 	@echo ""
 	@printf "  $(GREEN)Teardown$(NC)\n"
 	@printf "    make undeploy    Remove inference workload (keeps monitoring stack)\n"
@@ -282,6 +283,21 @@ test:
 		-H "Authorization: Bearer $$API_KEY" \
 		-d '{"prompt": "In one sentence, what is Kubernetes?", "max_tokens": 60}' \
 		| python3 -m json.tool
+
+# Integration tests for the jobs against RabbitMQ and Redis in Docker; the
+# same compose file the CI job uses. The containers are removed afterwards
+# whether the tests pass or not. Pass pytest options through PYTEST_ARGS.
+INTEGRATION_COMPOSE := tests/integration/compose.yaml
+PYTEST_ARGS ?=
+test-integration:
+	@printf "$(GREEN)[test-integration]$(NC) Starting RabbitMQ and Redis...\n"
+	@docker compose -f $(INTEGRATION_COMPOSE) up -d --wait
+	@VORTEX_IT_RABBITMQ_URL=amqp://vortex:integration-only@127.0.0.1:5673/ \
+	VORTEX_IT_REDIS_URL=redis://:integration-only@127.0.0.1:6380/0 \
+	python -m pytest tests/integration $(PYTEST_ARGS); \
+	status=$$?; \
+	docker compose -f $(INTEGRATION_COMPOSE) down -v; \
+	exit $$status
 
 load-test:
 	@printf "$(GREEN)[load-test]$(NC) Starting load test to trigger KEDA scale-out...\n"

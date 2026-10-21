@@ -1,0 +1,36 @@
+# RabbitMQ and Redis for tests/integration, used by `make test-integration`
+# and by the CI integration job, so both run against the same pinned images.
+#
+# Host ports are offset from the defaults (5673, 6380) to stay clear of any
+# broker or Redis a developer already runs locally, and are bound to
+# loopback only. The credentials exist only inside these throwaway
+# containers.
+name: vortex-integration
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.4.0-management-alpine@sha256:d5c8b200a061242868833c8bbdd0703534a4a06ffe654a853e33acd46c7ce258
+    environment:
+      RABBITMQ_DEFAULT_USER: vortex
+      RABBITMQ_DEFAULT_PASS: integration-only
+    ports:
+      - "127.0.0.1:5673:5672"
+      # Management UI, for looking at queues while debugging a test.
+      - "127.0.0.1:15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+
+  redis:
+    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    # No persistence: every run starts empty.
+    command: ["redis-server", "--requirepass", "integration-only", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "integration-only", "--no-auth-warning", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 15

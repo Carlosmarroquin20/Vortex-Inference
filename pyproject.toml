@@ -22,6 +22,9 @@ known-first-party = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs a real RabbitMQ and Redis; see tests/integration/conftest.py",
+]
 # Promote warnings raised by our own code to errors so deprecations surface
 # in CI rather than in production logs. Third-party warnings stay visible
 # but do not fail the run.

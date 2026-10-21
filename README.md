@@ -508,7 +508,7 @@ vortex-inference/
 │       ├── openai_compatible.py # Remote inference over an OpenAI-compatible API
 │       ├── anthropic_api.py  # Claude models via the Anthropic SDK
 │       └── upstream.py       # Status mapping shared by the remote backends
-├── tests/                    # pytest suite against an in-process llama_cpp fake
+├── tests/                    # pytest suite against an in-process llama_cpp fake; integration/ needs RabbitMQ and Redis
 ├── docs/
 │   └── runbooks.md           # One runbook per alert, linked via runbook_url
 ├── docker/
@@ -555,6 +555,19 @@ grep -v '^llama-cpp-python' requirements.txt > /tmp/requirements-test.txt
 pip install -r /tmp/requirements-test.txt -r requirements-dev.txt
 pytest --cov
 ruff check . && ruff format . --check
+```
+
+The job tests in `tests/integration` need a real RabbitMQ and Redis, and are
+reported as skipped without them. `make test-integration` starts both from
+`tests/integration/compose.yaml` (pinned images, loopback-only ports 5673 and
+6380), runs the tests and removes the containers; CI runs them on every push.
+They cover what the in-memory fakes can only assume: publisher confirms and
+mandatory routing, the retry queues' TTL dead-lettering, the quorum queue's
+delivery limit, draining on shutdown, and atomic idempotency claims.
+
+```bash
+make test-integration
+make test-integration PYTEST_ARGS="-k retry -x"
 ```
 
 The alerting rules have their own unit tests, run with

@@ -51,6 +51,25 @@ updates:
           - version-update:semver-major
           - version-update:semver-minor
 
+  # RabbitMQ and Redis for the integration tests. Major versions are left to
+  # a deliberate upgrade: RabbitMQ 4, for one, stopped counting requeues
+  # towards a quorum queue's delivery limit, which the worker depends on.
+  - package-ecosystem: docker-compose
+    directory: /tests/integration
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "test(deps)"
+    groups:
+      integration-services:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
