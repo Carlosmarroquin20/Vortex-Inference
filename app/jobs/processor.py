@@ -25,6 +25,7 @@ from typing import Literal, Protocol
 
 from pydantic import ValidationError
 
+from app import tracing
 from app.backends import BackendError, InferenceBackend
 from app.completions import (
     Failure,
@@ -153,10 +154,13 @@ class JobProcessor:
         model_name: str,
         max_attempts: int,
         timeout_seconds: float,
+        provider: str = "unknown",
     ) -> None:
         self._store = store
         self._runner = runner
         self._model = model_name
+        # The backend's name, for the generation span (gen_ai.provider.name).
+        self._provider = provider
         self._max_attempts = max_attempts
         self._timeout = timeout_seconds
 
@@ -271,8 +275,12 @@ class JobProcessor:
         logger.info("Job started.", extra={"attempt": job.attempts, "url": job.url})
 
         started = time.monotonic()
+        span = tracing.start_generation_span(generation, self._model, self._provider)
         try:
             done = await self._runner.run(generation)
+        except asyncio.CancelledError:
+            tracing.end_generation_span(span, outcome="cancelled")
+            raise
         except InferenceTimeout:
             logger.error(
                 "Job exceeded the inference deadline.",
@@ -287,7 +295,18 @@ class JobProcessor:
                 and failure.status_code in _RETRYABLE_STATUSES
             )
         else:
+            tracing.end_generation_span(
+                span,
+                tokens_prompt=done.result["tokens_prompt"],
+                tokens_completion=done.result["tokens_completion"],
+                finish_reason=done.result["finish_reason"],
+                response_model=done.result.get("model"),
+            )
             return await self._succeed(job, message, done)
+
+        tracing.end_generation_span(
+            span, outcome=failure.outcome, status_code=failure.status_code
+        )
 
         duration = time.monotonic() - started
         error = JobError(status_code=failure.status_code, message=failure.detail)

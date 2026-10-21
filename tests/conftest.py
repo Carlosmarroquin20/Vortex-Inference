@@ -51,8 +51,29 @@ sys.modules["llama_cpp"] = _fake_llama_cpp
 sys.modules["llama_cpp.llama_chat_format"] = _fake_chat_format
 
 from fastapi.testclient import TestClient  # noqa: E402
+from opentelemetry import trace  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
+    InMemorySpanExporter,
+)
+
+# Spans are recorded in memory for the whole session, so tests can assert on
+# what a request traced; the `spans` fixture hands over a cleared exporter.
+# The global provider can be set only once per process.
+_span_exporter = InMemorySpanExporter()
+_tracer_provider = TracerProvider()
+_tracer_provider.add_span_processor(SimpleSpanProcessor(_span_exporter))
+trace.set_tracer_provider(_tracer_provider)
 
 import app.main as main  # noqa: E402
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    """The span exporter, emptied; read it with get_finished_spans()."""
+    _span_exporter.clear()
+    return _span_exporter
 
 
 @pytest.fixture

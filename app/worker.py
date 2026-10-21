@@ -28,12 +28,20 @@ from aio_pika.abc import (
     AbstractIncomingMessage,
     AbstractRobustConnection,
 )
+from opentelemetry.trace import Span, SpanKind
 
+from app import tracing
 from app.backends import create_backend
 from app.config import Settings
 from app.jobs.health import WorkerHealth, serve
 from app.jobs.processor import BackendRunner, Decision, JobProcessor
-from app.jobs.queue import JobTopology, declare_topology, job_message, job_topology
+from app.jobs.queue import (
+    JobTopology,
+    declare_topology,
+    job_message,
+    job_topology,
+    messaging_attributes,
+)
 from app.jobs.store import RedisJobStore
 from app.logging_config import configure_logging, request_id_var
 from app.metrics import WORKER_JOBS_IN_PROGRESS, WORKER_JOBS_TOTAL
@@ -158,10 +166,30 @@ class Worker:
         # including the backend's, can be followed with one query.
         token = request_id_var.set(message.message_id)
         try:
+            # Continues the trace of whoever queued the job (the submitting
+            # request, or the previous attempt), carried in the headers.
+            with tracing.tracer.start_as_current_span(
+                f"process {self._topology.queue}",
+                context=tracing.extract(message.headers),
+                kind=SpanKind.CONSUMER,
+                attributes=messaging_attributes(
+                    self._topology.queue, message.message_id or ""
+                ),
+            ) as span:
+                await self._handle(message, span)
+        finally:
+            request_id_var.reset(token)
+            WORKER_JOBS_IN_PROGRESS.dec()
+            self._in_progress.discard(task)
+
+    async def _handle(self, message: AbstractIncomingMessage, span: Span) -> None:
+        try:
             decision = await self._processor.process(message.body)
+            span.set_attribute("vortex.job.outcome", decision.outcome)
             await self._settle(message, decision)
             WORKER_JOBS_TOTAL.labels(outcome=decision.outcome).inc()
         except asyncio.CancelledError:
+            span.set_attribute("vortex.job.outcome", "interrupted")
             raise
         except Exception:
             # The processor handles its own failures, so this is settling
@@ -172,10 +200,6 @@ class Worker:
             logger.exception("Could not settle the message. Requeueing it.")
             with contextlib.suppress(Exception):
                 await message.nack(requeue=True)
-        finally:
-            request_id_var.reset(token)
-            WORKER_JOBS_IN_PROGRESS.dec()
-            self._in_progress.discard(task)
 
     async def _settle(
         self, message: AbstractIncomingMessage, decision: Decision
@@ -207,6 +231,7 @@ async def run_worker(settings: Settings) -> None:
             # development only, the image runs on Linux.
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
 
+    tracer_provider = tracing.configure_tracing("vortex-worker")
     logger.info(
         "Starting job worker.",
         extra={"backend": settings.backend, "model": settings.model_name},
@@ -240,6 +265,7 @@ async def run_worker(settings: Settings) -> None:
             store,
             runner,
             model_name=settings.model_name,
+            provider=settings.backend,
             max_attempts=settings.job_max_attempts,
             timeout_seconds=settings.inference_timeout_seconds,
         ),
@@ -257,6 +283,7 @@ async def run_worker(settings: Settings) -> None:
         backend.close()
         await store.close()
         health_server.shutdown()
+        tracing.shutdown_tracing(tracer_provider)
         logger.info("Worker stopped.")
 
 

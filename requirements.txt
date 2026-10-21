@@ -38,3 +38,10 @@ anthropic==1.13.0
 # automatic reconnection, and the Redis client for job state.
 aio-pika==10.1.1
 redis==8.1.0
+
+# Distributed tracing (app/tracing.py). The API is a no-op unless an OTLP
+# endpoint is configured; the SDK and the OTLP/HTTP exporter are imported
+# only then. The three are released together and pinned to one version.
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1

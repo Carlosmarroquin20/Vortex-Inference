@@ -12,6 +12,9 @@ Each HTTP request is tagged with a request ID (taken from an inbound
 X-Request-ID header or generated) that is attached to every log line written
 while serving it, including lines from the inference worker thread, and is
 echoed back in the response headers so clients can quote it in bug reports.
+When tracing is on (app/tracing.py), every log line written inside a trace
+carries its trace_id, which links a log line to the trace that produced it,
+and the request's server span carries the request ID.
 """
 
 import logging
@@ -21,7 +24,10 @@ import uuid
 from contextvars import ContextVar
 from datetime import UTC, datetime
 
+from opentelemetry import trace
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from app import tracing
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -62,6 +68,9 @@ class LogfmtFormatter(logging.Formatter):
         request_id = request_id_var.get()
         if request_id is not None:
             pairs.append(("request_id", request_id))
+        trace_id = tracing.current_trace_id()
+        if trace_id is not None:
+            pairs.append(("trace_id", trace_id))
 
         for key, value in record.__dict__.items():
             if key not in _RESERVED_ATTRS and not key.startswith("_"):
@@ -108,7 +117,7 @@ _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 # Probe and scrape traffic arrives every few seconds per pod. Logging it at
 # INFO would drown the request log, so it is demoted to DEBUG.
-_QUIET_PATHS = frozenset({"/health", "/health/live", "/health/ready", "/metrics"})
+QUIET_PATHS = frozenset({"/health", "/health/live", "/health/ready", "/metrics"})
 
 _access_logger = logging.getLogger("vortex.access")
 
@@ -147,11 +156,16 @@ class RequestContextMiddleware:
                 message = {**message, "headers": headers}
             await send(message)
 
+        # FastAPI's own instrumentation has opened the request's server span
+        # by now (app/main.py); tagging it lets a trace be found from the ID
+        # a client quotes.
+        trace.get_current_span().set_attribute("vortex.request_id", request_id)
+
         try:
             await self.app(scope, receive, send_with_request_id)
         finally:
             path = scope.get("path", "")
-            level = logging.DEBUG if path in _QUIET_PATHS else logging.INFO
+            level = logging.DEBUG if path in QUIET_PATHS else logging.INFO
             _access_logger.log(
                 level,
                 "Request completed.",

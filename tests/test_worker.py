@@ -352,6 +352,7 @@ class FakeMessage:
     def __init__(self, data: bytes = b"", message_id: str = JOB_ID) -> None:
         self.body = data
         self.message_id = message_id
+        self.headers: dict = {}
         self.settled: list = []
 
     async def ack(self):

@@ -590,6 +590,45 @@ sum(vortex_inference_active_requests{namespace="vortex-inference"})
 sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m])) / sum(rate(vortex_inference_requests_total[5m]))
 ```
 
+### Tracing
+
+The API and the worker export OpenTelemetry traces over OTLP/HTTP when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set (the standard OpenTelemetry variables
+apply: `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_HEADERS`, sampling). Without
+it the instrumentation is a no-op. A trace holds:
+
+- the HTTP server span, from FastAPI's built-in instrumentation, continuing an
+  inbound `traceparent` and tagged with the request ID (probes and scrapes are
+  not traced);
+- one generation span per backend call, named and attributed after the GenAI
+  semantic conventions (`gen_ai.request.model`, `gen_ai.usage.input_tokens`,
+  `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`), with events
+  when the inference permit is acquired and, for streams, at the first token;
+- for jobs, a `publish` span in the API and a `process` span per attempt in the
+  worker. The trace context travels in the AMQP message headers, so a job is
+  one trace from the request that submitted it to the attempt that finished
+  it, retries included:
+
+```
+vortex-inference  POST /v1/jobs
+vortex-inference   └ publish vortex.jobs
+vortex-worker        └ process vortex.jobs        retried
+vortex-worker           ├ chat stub-model
+vortex-worker           └ process vortex.jobs     succeeded
+vortex-worker              └ chat stub-model
+```
+
+Log lines written inside a trace carry its `trace_id`, so a log query leads to
+the trace and back. To try it locally:
+
+```bash
+docker run -d -p 127.0.0.1:16686:16686 -p 127.0.0.1:4318:4318 jaegertracing/all-in-one:1.76.0
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 python -m uvicorn app.main:app
+```
+
+In the cluster, point `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector and allow
+the pods' egress to it; the NetworkPolicies deny it by default.
+
 ---
 
 ## SLOs
@@ -617,6 +656,7 @@ vortex-inference/
 │   ├── metrics.py            # Prometheus metric definitions
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
 │   ├── logging_config.py     # logfmt formatter + request ID middleware
+│   ├── tracing.py            # OpenTelemetry setup, generation spans, AMQP propagation
 │   ├── jobs/                 # Asynchronous jobs: API, RabbitMQ topology, Redis store, processor
 │   └── backends/
 │       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND

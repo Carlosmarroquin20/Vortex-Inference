@@ -37,7 +37,9 @@ from aio_pika.abc import (
     AbstractQueue,
     AbstractRobustConnection,
 )
+from opentelemetry.trace import SpanKind
 
+from app import tracing
 from app.config import Settings
 from app.jobs.models import JobMessage
 
@@ -181,6 +183,14 @@ class RabbitMQJobQueue:
         self._exchange: AbstractExchange | None = None
 
     async def publish(self, message: JobMessage) -> None:
+        with tracing.tracer.start_as_current_span(
+            f"publish {self._topology.queue}",
+            kind=SpanKind.PRODUCER,
+            attributes=messaging_attributes(self._topology.queue, message.job_id),
+        ):
+            await self._publish(message)
+
+    async def _publish(self, message: JobMessage) -> None:
         try:
             exchange = await self._ready()
             # mandatory with on_return_raises: a message no queue would take
@@ -234,10 +244,28 @@ class RabbitMQJobQueue:
 
 
 def job_message(message: JobMessage) -> aio_pika.Message:
-    """The AMQP message for a job, as published by the API and by retries."""
+    """
+    The AMQP message for a job, as published by the API and by retries.
+
+    The current trace context goes in the headers (traceparent), so the
+    worker that runs the job continues the trace of whoever queued it: the
+    submitting request, or the previous attempt for a retry.
+    """
+    headers: dict[str, str] = {}
+    tracing.inject(headers)
     return aio_pika.Message(
         body=message.model_dump_json().encode("utf-8"),
         content_type="application/json",
         delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
         message_id=message.job_id,
+        headers=headers,
     )
+
+
+def messaging_attributes(queue: str, job_id: str) -> dict[str, str]:
+    """Span attributes for a job message, per the messaging conventions."""
+    return {
+        "messaging.system": "rabbitmq",
+        "messaging.destination.name": queue,
+        "messaging.message.id": job_id,
+    }

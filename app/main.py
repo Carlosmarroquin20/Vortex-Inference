@@ -42,11 +42,14 @@ from typing import Annotated, Protocol
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from opentelemetry.trace import Span
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
+from app import tracing
 from app.backends import (
+    GenerationResult,
     InferenceBackend,
     StreamEnd,
     StreamEvent,
@@ -67,6 +70,7 @@ from app.jobs.api import router as jobs_router
 from app.jobs.queue import RabbitMQJobQueue, job_topology
 from app.jobs.store import RedisJobStore
 from app.logging_config import (
+    QUIET_PATHS,
     RequestContextMiddleware,
     configure_logging,
     request_id_var,
@@ -179,6 +183,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     global backend, _inference_semaphore, _inference_executor
 
+    tracer_provider = tracing.configure_tracing("vortex-inference")
+
     logger.info(
         "Starting inference engine initialization.",
         extra={"backend": settings.backend, "model": settings.model_name},
@@ -269,6 +275,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if app.state.jobs is not None:
         await app.state.jobs.queue.close()
         await app.state.jobs.store.close()
+    tracing.shutdown_tracing(tracer_provider)
     logger.info("Shutdown complete.")
 
 
@@ -288,6 +295,20 @@ app = FastAPI(
     docs_url="/docs" if settings.enable_docs else None,
     redoc_url="/redoc" if settings.enable_docs else None,
     openapi_url="/openapi.json" if settings.enable_docs else None,
+    # FastAPI's built-in OpenTelemetry instrumentation opens each request's
+    # server span (continuing an inbound traceparent, named after the route);
+    # app/tracing.py adds the generation and job spans under it. It is a
+    # no-op until tracing is configured. Probes and scrapes are left out, as
+    # in the access log; Prometheus already covers metrics; and exception
+    # messages and stack traces are not exported as OpenTelemetry logs, since
+    # llama.cpp's can include file paths. Per-dependency and serialization
+    # spans add little next to the generation span.
+    telemetry={
+        "exclude": lambda scope: scope.get("path") in QUIET_PATHS,
+        "metrics": False,
+        "logs": False,
+        "operation_spans": False,
+    },
 )
 app.add_middleware(RequestContextMiddleware)
 
@@ -357,6 +378,28 @@ def _classify_failure(exc: Exception) -> tuple[str, HTTPException]:
     headers = {"Retry-After": failure.retry_after} if failure.retry_after else None
     return failure.outcome, HTTPException(
         status_code=failure.status_code, detail=failure.detail, headers=headers
+    )
+
+
+def _permit_acquired(span: Span, queue_wait: float) -> None:
+    span.add_event("permit_acquired", {"vortex.queue_wait_seconds": queue_wait})
+
+
+def _end_span(
+    span: Span,
+    result: GenerationResult | None,
+    outcome: str | None,
+    status_code: int | None,
+) -> None:
+    tracing.end_generation_span(
+        span,
+        tokens_prompt=result["tokens_prompt"] if result else None,
+        tokens_completion=result["tokens_completion"] if result else None,
+        finish_reason=result["finish_reason"] if result else None,
+        response_model=result.get("model") if result else None,
+        # No outcome means the request was cancelled while still queued.
+        outcome=outcome or "cancelled",
+        status_code=status_code,
     )
 
 
@@ -554,6 +597,14 @@ async def _run_buffered(generation: Generation) -> Finished:
     request_start: float | None = None
     outcome: str | None = None
 
+    # The generation span covers the wait for the permit too, so a trace
+    # shows queueing and generation for the same request side by side.
+    span = tracing.start_generation_span(
+        generation, settings.model_name, settings.backend
+    )
+    completed: GenerationResult | None = None
+    status_code: int | None = None
+
     try:
         enqueued_at = time.monotonic()
         await _inference_semaphore.acquire()
@@ -564,6 +615,7 @@ async def _run_buffered(generation: Generation) -> Finished:
         # is recorded separately.
         request_start = time.monotonic()
         QUEUE_WAIT_SECONDS.observe(request_start - enqueued_at)
+        _permit_acquired(span, request_start - enqueued_at)
 
         stop_event = threading.Event()
         loop = asyncio.get_running_loop()
@@ -646,13 +698,16 @@ async def _run_buffered(generation: Generation) -> Finished:
                 "finish_reason": result["finish_reason"],
             },
         )
+        completed = result
         return Finished(result=result, duration=duration, tokens_per_second=tps)
 
-    except HTTPException:
+    except HTTPException as exc:
+        status_code = exc.status_code
         raise
 
     except Exception as exc:
         outcome, http_exc = _classify_failure(exc)
+        status_code = http_exc.status_code
         INFERENCE_REQUESTS_TOTAL.labels(status=outcome).inc()
         raise http_exc from exc
 
@@ -661,6 +716,7 @@ async def _run_buffered(generation: Generation) -> Finished:
             INFERENCE_DURATION_SECONDS.labels(status=outcome).observe(
                 time.monotonic() - request_start
             )
+        _end_span(span, completed, outcome, status_code)
 
         # On the timeout and cancellation paths, _drain_and_release() owns the
         # semaphore release and gauge decrement once the thread exits. All
@@ -851,13 +907,18 @@ async def _run_streamed(
     # Counted while queued, as for buffered requests: this is KEDA's signal.
     INFERENCE_ACTIVE_REQUESTS.inc()
     enqueued_at = time.monotonic()
+    span = tracing.start_generation_span(
+        generation, settings.model_name, settings.backend
+    )
     try:
         await _inference_semaphore.acquire()
     except BaseException:
         INFERENCE_ACTIVE_REQUESTS.dec()
+        _end_span(span, None, "cancelled", None)
         raise
     request_start = time.monotonic()
     QUEUE_WAIT_SECONDS.observe(request_start - enqueued_at)
+    _permit_acquired(span, request_start - enqueued_at)
     # One deadline for the whole stream, measured like the buffered timeout,
     # so a stream cannot hold the permit longer than a buffered request.
     deadline = request_start + settings.inference_timeout_seconds
@@ -898,6 +959,7 @@ async def _run_streamed(
     except TimeoutError as exc:
         stop_event.set()
         _record_outcome("timeout", request_start)
+        _end_span(span, None, "timeout", 504)
         logger.error(
             "Inference produced no output before its deadline.",
             extra={"timeout_seconds": settings.inference_timeout_seconds},
@@ -906,12 +968,14 @@ async def _run_streamed(
     except asyncio.CancelledError:
         stop_event.set()
         _record_outcome("cancelled", request_start)
+        _end_span(span, None, "cancelled", None)
         logger.warning("Streamed inference cancelled before its first output.")
         raise
 
     if isinstance(first, _StreamFailure):
         outcome, http_exc = _classify_failure(first.exc)
         _record_outcome(outcome, request_start)
+        _end_span(span, None, outcome, http_exc.status_code)
         raise http_exc from first.exc
 
     return _ClosingStreamingResponse(
@@ -923,6 +987,7 @@ async def _run_streamed(
             _StreamTiming(enqueued_at=enqueued_at, request_start=request_start),
             chunks,
             include_usage,
+            span,
         ),
         media_type="text/event-stream",
         headers=_STREAM_HEADERS,
@@ -945,10 +1010,13 @@ async def _sse_body(
     timing: _StreamTiming,
     chunks: _ChunkFormatter,
     include_usage: bool,
+    span: Span,
 ) -> AsyncIterator[str]:
     request_start = timing.request_start
     outcome: str | None = None
     first_token_at: float | None = None
+    end: StreamEnd | None = None
+    status_code: int | None = None
     event: StreamEvent | _StreamFailure = first
     try:
         for opening in chunks.opening():
@@ -961,12 +1029,20 @@ async def _sse_body(
                     TIME_TO_FIRST_TOKEN_SECONDS.observe(
                         first_token_at - timing.enqueued_at
                     )
+                    span.add_event(
+                        "first_token",
+                        {
+                            "vortex.time_to_first_token_seconds": first_token_at
+                            - timing.enqueued_at
+                        },
+                    )
                 yield _sse(chunks.text(event.text))
 
             elif isinstance(event, StreamEnd):
                 # Generation is complete at this point; a client that leaves
                 # while the trailer is sent does not turn it into a cancel.
                 outcome = "success"
+                end = event
                 finished_at = time.monotonic()
                 duration = finished_at - request_start
                 tps = _record_usage(
@@ -1012,6 +1088,7 @@ async def _sse_body(
 
             else:
                 outcome, http_exc = _classify_failure(event.exc)
+                status_code = http_exc.status_code
                 yield _sse_error(http_exc)
                 return
 
@@ -1019,6 +1096,7 @@ async def _sse_body(
 
     except TimeoutError:
         outcome = "timeout"
+        status_code = 504
         logger.error(
             "Streamed inference exceeded its deadline. Worker thread signalled "
             "to stop.",
@@ -1040,6 +1118,14 @@ async def _sse_body(
         stop_event.set()
         if outcome is not None:
             _record_outcome(outcome, request_start)
+        tracing.end_generation_span(
+            span,
+            tokens_prompt=end.tokens_prompt if end else None,
+            tokens_completion=end.tokens_completion if end else None,
+            finish_reason=end.finish_reason if end else None,
+            outcome=outcome or "cancelled",
+            status_code=status_code,
+        )
 
 
 # ---------------------------------------------------------------------------
