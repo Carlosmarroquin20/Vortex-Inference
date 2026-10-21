@@ -8,6 +8,7 @@ import pytest
 
 from app.backends import BackendError, RequestRejectedError
 from app.completions import Finished
+from app.jobs.health import WorkerHealth
 from app.jobs.models import Job, JobMessage
 from app.jobs.processor import (
     BackendRunner,
@@ -554,18 +555,22 @@ def broker(monkeypatch):
 def test_run_consumes_with_prefetch_and_drains_on_stop(broker):
     gate = asyncio.Event()
     worker = make_worker(StaticProcessor(Decision("ack", "succeeded"), gate=gate))
+    health = WorkerHealth(backend=None, timeout_seconds=5)
+    worker._health = health
     message = FakeMessage()
 
     async def scenario():
         stop = asyncio.Event()
         running = asyncio.create_task(worker.run(stop))
         await broker["queue"].consuming.wait()
+        assert health.ready()
         handling = asyncio.create_task(broker["queue"].callback(message))
         await asyncio.sleep(0.01)
         stop.set()
         await asyncio.sleep(0.05)
         # Stopped consuming, but still waiting for the job in progress.
         assert broker["queue"].cancelled and not running.done()
+        assert not health.ready()
         gate.set()
         await running
         await handling
@@ -664,17 +669,16 @@ def test_run_worker_wires_settings_and_cleans_up(monkeypatch):
         def close(self):
             events.append("backend closed")
 
-    class MetricsServer:
+    class HealthServer:
         def shutdown(self):
-            events.append("metrics stopped")
+            events.append("health stopped")
 
     async def fake_run(self, stop):
         events.append(("run", self._url, self._concurrency, self._drain_timeout))
+        assert self._health is not None
 
     monkeypatch.setattr(worker_module, "create_backend", lambda s: Backend())
-    monkeypatch.setattr(
-        worker_module, "start_http_server", lambda port: (MetricsServer(), None)
-    )
+    monkeypatch.setattr(worker_module, "serve", lambda health, port: HealthServer())
     monkeypatch.setattr(worker_module.Worker, "run", fake_run)
 
     run(worker_module.run_worker(settings))
@@ -682,5 +686,5 @@ def test_run_worker_wires_settings_and_cleans_up(monkeypatch):
     assert events == [
         ("run", "amqp://u:p@rabbit/", 3, 30 + worker_module.SHUTDOWN_GRACE_SECONDS),
         "backend closed",
-        "metrics stopped",
+        "health stopped",
     ]

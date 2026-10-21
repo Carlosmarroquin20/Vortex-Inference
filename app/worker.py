@@ -28,10 +28,10 @@ from aio_pika.abc import (
     AbstractIncomingMessage,
     AbstractRobustConnection,
 )
-from prometheus_client import start_http_server
 
 from app.backends import create_backend
 from app.config import Settings
+from app.jobs.health import WorkerHealth, serve
 from app.jobs.processor import BackendRunner, Decision, JobProcessor
 from app.jobs.queue import JobTopology, declare_topology, job_message, job_topology
 from app.jobs.store import RedisJobStore
@@ -60,6 +60,7 @@ class Worker:
         concurrency: int,
         drain_timeout_seconds: float,
         publish_timeout_seconds: float,
+        health: WorkerHealth | None = None,
     ) -> None:
         self._url = url
         self._topology = topology
@@ -69,6 +70,7 @@ class Worker:
         self._publish_timeout = publish_timeout_seconds
         self._channel: AbstractChannel | None = None
         self._in_progress: set[asyncio.Task] = set()
+        self._health = health
 
     async def run(self, stop: asyncio.Event) -> None:
         """Consumes until stop is set, then drains and disconnects."""
@@ -83,12 +85,14 @@ class Worker:
             declared = await declare_topology(channel, self._topology)
             self._channel = channel
             consumer_tag = await declared.queue.consume(self._on_message)
+            self._set_consuming(True)
             logger.info(
                 "Worker consuming.",
                 extra={"queue": self._topology.queue, "prefetch": self._concurrency},
             )
 
             await stop.wait()
+            self._set_consuming(False)
 
             # No new deliveries from here on. Messages delivered before the
             # cancel took effect are already in progress and drained below.
@@ -96,6 +100,10 @@ class Worker:
             await self._drain()
         finally:
             await connection.close()
+
+    def _set_consuming(self, consuming: bool) -> None:
+        if self._health is not None:
+            self._health.consuming = consuming
 
     async def _connect(self, stop: asyncio.Event) -> AbstractRobustConnection | None:
         delay = _CONNECT_RETRY_INITIAL
@@ -210,7 +218,11 @@ async def run_worker(settings: Settings) -> None:
         extra={"duration_seconds": round(time.monotonic() - load_start, 2)},
     )
 
-    metrics_server, _ = start_http_server(settings.worker_metrics_port)
+    # Started once the model is loaded: until then the startup probe sees a
+    # closed port, which it counts as not started yet.
+    health = WorkerHealth(backend, timeout_seconds=settings.inference_timeout_seconds)
+    health_server = serve(health, settings.worker_metrics_port)
+    heartbeat = asyncio.create_task(health.run_heartbeat())
     store = RedisJobStore(
         settings.redis_url.get_secret_value(),
         ttl_seconds=settings.job_ttl_seconds,
@@ -235,14 +247,16 @@ async def run_worker(settings: Settings) -> None:
         drain_timeout_seconds=settings.inference_timeout_seconds
         + SHUTDOWN_GRACE_SECONDS,
         publish_timeout_seconds=settings.jobs_service_timeout_seconds,
+        health=health,
     )
     try:
         await worker.run(stop)
     finally:
+        heartbeat.cancel()
         runner.close()
         backend.close()
         await store.close()
-        metrics_server.shutdown()
+        health_server.shutdown()
         logger.info("Worker stopped.")
 
 

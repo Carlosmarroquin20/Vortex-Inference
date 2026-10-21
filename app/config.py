@@ -161,7 +161,7 @@ class Settings(BaseSettings):
     # (see app/jobs/queue.py).
     job_retry_delay_seconds: int = Field(default=10, ge=1, le=3600)
 
-    # Port of the worker's Prometheus endpoint (python -m app.worker).
+    # Port of the worker's metrics and probe endpoint (python -m app.worker).
     worker_metrics_port: int = Field(default=9090, ge=1, le=65535)
 
     # Bound on each call to RabbitMQ or Redis from the API, so an unreachable

@@ -397,6 +397,10 @@ as the API, so it loads the same backend, and takes up to
 - **Shutdown.** On SIGTERM the worker stops consuming, lets jobs in progress
   finish (up to `VORTEX_INFERENCE_TIMEOUT_SECONDS` plus 15s) and exits; jobs
   still running at the deadline are stopped and redelivered elsewhere.
+- **Probes.** The same port serves `/health/ready` (model loaded and
+  consuming) and `/health/live`, which fails when the event loop stops
+  running or an inference thread is wedged past its deadline, the two
+  conditions a restart fixes.
 - **Metrics** on `VORTEX_WORKER_METRICS_PORT` (9090):
   `vortex_worker_jobs_total{outcome}`, `vortex_worker_job_duration_seconds`,
   `vortex_worker_job_wait_seconds` (submission to first attempt) and
