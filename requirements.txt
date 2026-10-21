@@ -15,7 +15,7 @@ uvicorn[standard]==0.54.0
 # request-parsing CVEs in the image. Pinning it here makes the security-relevant
 # version visible in review and to dependency scanners instead of leaving it to
 # the resolver.
-starlette==1.7.0
+starlette==1.8.0
 
 # Configuration management via Pydantic v2
 pydantic==2.14.1
