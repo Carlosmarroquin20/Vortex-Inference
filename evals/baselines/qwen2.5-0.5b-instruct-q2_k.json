@@ -1,0 +1,272 @@
+{
+  "dataset": "evals/datasets/core.jsonl",
+  "summary": {
+    "cases": 20,
+    "passed": 18,
+    "errors": 0,
+    "pass_rate": 0.9,
+    "by_tag": {
+      "chat": 1.0,
+      "classification": 1.0,
+      "domain": 0.0,
+      "extraction": 0.5,
+      "instructions": 1.0,
+      "knowledge": 0.8,
+      "language": 1.0,
+      "reasoning": 1.0,
+      "structured": 1.0
+    },
+    "latency_p50_seconds": 0.539,
+    "completion_tokens": 141
+  },
+  "cases": [
+    {
+      "id": "arith-add",
+      "tags": [
+        "reasoning"
+      ],
+      "passed": true,
+      "reply": "42",
+      "failures": [],
+      "latency_seconds": 1.001,
+      "completion_tokens": 2,
+      "error": null
+    },
+    {
+      "id": "arith-multiply",
+      "tags": [
+        "reasoning"
+      ],
+      "passed": true,
+      "reply": "96",
+      "failures": [],
+      "latency_seconds": 0.3,
+      "completion_tokens": 2,
+      "error": null
+    },
+    {
+      "id": "arith-word-problem",
+      "tags": [
+        "reasoning"
+      ],
+      "passed": true,
+      "reply": "42 eggs",
+      "failures": [],
+      "latency_seconds": 0.315,
+      "completion_tokens": 3,
+      "error": null
+    },
+    {
+      "id": "compare-numbers",
+      "tags": [
+        "reasoning"
+      ],
+      "passed": true,
+      "reply": "9.9",
+      "failures": [],
+      "latency_seconds": 0.319,
+      "completion_tokens": 3,
+      "error": null
+    },
+    {
+      "id": "capital-france",
+      "tags": [
+        "knowledge"
+      ],
+      "passed": true,
+      "reply": "Paris",
+      "failures": [],
+      "latency_seconds": 0.186,
+      "completion_tokens": 1,
+      "error": null
+    },
+    {
+      "id": "capital-japan",
+      "tags": [
+        "knowledge"
+      ],
+      "passed": true,
+      "reply": "Tokyo",
+      "failures": [],
+      "latency_seconds": 0.217,
+      "completion_tokens": 2,
+      "error": null
+    },
+    {
+      "id": "chemistry-water",
+      "tags": [
+        "knowledge"
+      ],
+      "passed": true,
+      "reply": "Water has the chemical formula H2O, which represents two hydrogen atoms and one oxygen atom bonded together.",
+      "failures": [],
+      "latency_seconds": 0.745,
+      "completion_tokens": 21,
+      "error": null
+    },
+    {
+      "id": "planet-largest",
+      "tags": [
+        "knowledge"
+      ],
+      "passed": true,
+      "reply": "Jupiter",
+      "failures": [],
+      "latency_seconds": 0.242,
+      "completion_tokens": 2,
+      "error": null
+    },
+    {
+      "id": "k8s-scheduler",
+      "tags": [
+        "knowledge",
+        "domain"
+      ],
+      "passed": false,
+      "reply": "NodeSelector",
+      "failures": [
+        "contains {\"value\": \"scheduler\"}"
+      ],
+      "latency_seconds": 0.239,
+      "completion_tokens": 2,
+      "error": null
+    },
+    {
+      "id": "format-uppercase",
+      "tags": [
+        "instructions"
+      ],
+      "passed": true,
+      "reply": "HELLO",
+      "failures": [],
+      "latency_seconds": 0.218,
+      "completion_tokens": 2,
+      "error": null
+    },
+    {
+      "id": "format-json-object",
+      "tags": [
+        "instructions",
+        "structured"
+      ],
+      "passed": true,
+      "reply": "```json\n{\n  \"name\": \"Ada\",\n  \"age\": 36\n}\n```",
+      "failures": [],
+      "latency_seconds": 1.263,
+      "completion_tokens": 21,
+      "error": null
+    },
+    {
+      "id": "format-json-list",
+      "tags": [
+        "instructions",
+        "structured"
+      ],
+      "passed": true,
+      "reply": "```json\n[\n    \"red\",\n    \"green\",\n    \"blue\"\n]\n```",
+      "failures": [],
+      "latency_seconds": 0.631,
+      "completion_tokens": 18,
+      "error": null
+    },
+    {
+      "id": "format-one-word",
+      "tags": [
+        "instructions"
+      ],
+      "passed": true,
+      "reply": "Red",
+      "failures": [],
+      "latency_seconds": 0.168,
+      "completion_tokens": 1,
+      "error": null
+    },
+    {
+      "id": "format-list-three",
+      "tags": [
+        "instructions"
+      ],
+      "passed": true,
+      "reply": "1. Apple\n2. Banana\n3. Orange",
+      "failures": [],
+      "latency_seconds": 0.539,
+      "completion_tokens": 11,
+      "error": null
+    },
+    {
+      "id": "system-persona",
+      "tags": [
+        "instructions",
+        "chat"
+      ],
+      "passed": true,
+      "reply": "Arr. I'm doing well, thanks for asking. How about you?",
+      "failures": [],
+      "latency_seconds": 0.608,
+      "completion_tokens": 15,
+      "error": null
+    },
+    {
+      "id": "context-recall",
+      "tags": [
+        "chat"
+      ],
+      "passed": true,
+      "reply": "314",
+      "failures": [],
+      "latency_seconds": 1.169,
+      "completion_tokens": 3,
+      "error": null
+    },
+    {
+      "id": "extract-email",
+      "tags": [
+        "extraction"
+      ],
+      "passed": false,
+      "reply": "The email address extracted from the text is: support@vortex.example.",
+      "failures": [
+        "max_words {\"value\": 3}"
+      ],
+      "latency_seconds": 0.96,
+      "completion_tokens": 15,
+      "error": null
+    },
+    {
+      "id": "extract-date",
+      "tags": [
+        "extraction"
+      ],
+      "passed": true,
+      "reply": "2026-03-14",
+      "failures": [],
+      "latency_seconds": 1.049,
+      "completion_tokens": 10,
+      "error": null
+    },
+    {
+      "id": "classify-sentiment",
+      "tags": [
+        "classification"
+      ],
+      "passed": true,
+      "reply": "negative",
+      "failures": [],
+      "latency_seconds": 0.649,
+      "completion_tokens": 1,
+      "error": null
+    },
+    {
+      "id": "translate-spanish",
+      "tags": [
+        "language"
+      ],
+      "passed": true,
+      "reply": "¡Buenos días!",
+      "failures": [],
+      "latency_seconds": 0.351,
+      "completion_tokens": 6,
+      "error": null
+    }
+  ]
+}

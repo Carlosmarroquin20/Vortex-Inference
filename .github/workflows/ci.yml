@@ -178,12 +178,13 @@ jobs:
             scripts/*.sh
 
   # ---------------------------------------------------------------------------
-  # Job 5: Docker build and image scan
+  # Job 5: Docker build, image scan and evaluation
   # Validates the multi-stage Dockerfile compiles successfully.
   # llama-cpp-python compilation (~5–8 min) is the most common failure point
   # when system library versions or CMake flags change.
   # The built image is NOT pushed. It is loaded into the runner's daemon so
-  # Trivy can scan exactly what was built, OS packages and Python packages.
+  # Trivy can scan exactly what was built, OS packages and Python packages,
+  # and so the evaluation dataset runs against that same image.
   # ---------------------------------------------------------------------------
   docker-build:
     name: Build Docker Image
@@ -220,6 +221,62 @@ jobs:
             image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
             --exit-code 1 --no-progress \
             "vortex-inference:ci-${{ github.sha }}"
+
+      # Quality gate: the image just built answers the evaluation dataset with
+      # a real model. Qwen2.5-0.5B (415MB) stands in for the deployed Phi-3,
+      # which is too large to download on every run; it exercises the same
+      # engine, chat templating and API, so a change that breaks generation or
+      # prompt formatting shows up as a drop in the pass rate. Generation is
+      # greedy, so a run is reproducible and any drop is a real change.
+      - name: Cache the evaluation model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: models/qwen2.5-0.5b-instruct-q2_k.gguf
+          key: eval-model-9ee36184e616dfc76df4f5dd66f908dbde6979524ae36e6cefb67f532f798cb8
+
+      - name: Download the evaluation model
+        # Pinned to a repository commit and verified against its SHA-256 by
+        # the same script that fetches the production model; a cached file
+        # is re-verified rather than trusted.
+        env:
+          MODEL_FILENAME: qwen2.5-0.5b-instruct-q2_k.gguf
+          HF_REPO: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+          HF_FILENAME: qwen2.5-0.5b-instruct-q2_k.gguf
+          HF_REVISION: 9217f5db79a29953eb74d5343926648285ec7e67
+          MODEL_SHA256: 9ee36184e616dfc76df4f5dd66f908dbde6979524ae36e6cefb67f532f798cb8
+          MODEL_SIZE: "415182688"
+        run: bash scripts/download-model.sh
+
+      - name: Run the evaluation dataset
+        # Same CPU budget and thread caps as an inference pod. The baseline
+        # for this model is in evals/baselines/; the gate allows a little
+        # below it for differences in the runner's CPU kernels.
+        run: |
+          docker run -d --name vortex-eval --cpus 2 -p 127.0.0.1:8080:8080 \
+            -e VORTEX_MODEL_PATH=/models/qwen2.5-0.5b-instruct-q2_k.gguf \
+            -e VORTEX_MODEL_NAME=qwen2.5-0.5b-instruct-q2_k \
+            -e VORTEX_N_THREADS=2 -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=2 \
+            -v "${PWD}/models:/models:ro" \
+            "vortex-inference:ci-${{ github.sha }}"
+          for _ in $(seq 120); do
+            curl -sf http://127.0.0.1:8080/health/ready > /dev/null && break
+            sleep 1
+          done
+          python3 scripts/run_evals.py --url http://127.0.0.1:8080 \
+            --dataset evals/datasets/core.jsonl \
+            --min-pass-rate 0.85 --json eval-report.json
+
+      - name: Server logs
+        if: failure()
+        run: docker logs vortex-eval
+
+      - name: Upload the evaluation report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-report
+          path: eval-report.json
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
   # Job 6: Kubernetes manifest validation

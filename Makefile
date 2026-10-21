@@ -52,7 +52,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build api-key show-api-key provider-key jobs-secrets require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen tunnel clean
+.PHONY: help setup model build api-key show-api-key provider-key jobs-secrets require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen eval tunnel clean
 
 # =============================================================================
 # Default target — always show help first
@@ -83,6 +83,7 @@ help:
 	@printf "    make test        Send a single inference request to verify the stack\n"
 	@printf "    make load-test   Run concurrent requests to trigger KEDA scale-out\n"
 	@printf "    make loadgen     Measure client-side latency (TTFT, TPOT); see LOADGEN_ARGS\n"
+	@printf "    make eval        Run the evaluation dataset against the deployed model\n"
 	@printf "    make test-integration  Run the jobs tests against RabbitMQ and Redis in Docker\n"
 	@echo ""
 	@printf "  $(GREEN)Teardown$(NC)\n"
@@ -343,3 +344,18 @@ loadgen:
 	VORTEX_API_KEY=$$(kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) \
 		-o jsonpath='{.data.api-key}' | base64 -d) \
 		python3 scripts/loadgen.py --url "http://$$INFERENCE_IP" $(LOADGEN_ARGS)
+
+# Runs the evaluation dataset against the deployed model through the
+# LoadBalancer. Options pass through scripts/run_evals.py, e.g.
+#   make eval EVAL_ARGS="--min-pass-rate 0.9 --json report.json"
+EVAL_ARGS ?=
+eval:
+	@INFERENCE_IP=$$(kubectl get svc vortex-inference-lb -n $(NAMESPACE) \
+		-o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null); \
+	if [ -z "$$INFERENCE_IP" ]; then \
+		printf "$(RED)[eval]$(NC) LoadBalancer IP not assigned. Is 'make tunnel' running?\n"; \
+		exit 1; \
+	fi; \
+	VORTEX_API_KEY=$$(kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) \
+		-o jsonpath='{.data.api-key}' | base64 -d) \
+		python3 scripts/run_evals.py --url "http://$$INFERENCE_IP" $(EVAL_ARGS)

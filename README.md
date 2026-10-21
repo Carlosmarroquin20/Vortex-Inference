@@ -461,6 +461,35 @@ Secret.
   failing submissions, with runbooks in [docs/runbooks.md](docs/runbooks.md),
   and an Asynchronous Jobs row in the Grafana dashboard.
 
+## Evaluation
+
+`scripts/run_evals.py` runs a dataset of conversations against
+`/v1/chat/completions` and grades each reply with deterministic checks
+(contains, regex, valid JSON with given keys, word and line counts). Replies
+are generated with temperature 0, so a run is reproducible, and the same
+dataset compares backends on equal terms: a local GGUF model, a vLLM server
+or a provider's API behind the remote profile.
+
+[`evals/datasets/core.jsonl`](evals/datasets/core.jsonl) holds 20 cases tagged
+by what they exercise: reasoning, knowledge, instruction following,
+structured output, multi-turn chat, extraction, classification and
+translation. It is a regression gate rather than a benchmark: the cases are
+easy enough for a small model to pass most of, so a drop means something in
+the serving path (chat templating, stop handling, sampling defaults) or the
+model changed.
+
+```bash
+python scripts/run_evals.py --url http://127.0.0.1:8080 --json report.json
+make eval EVAL_ARGS="--min-pass-rate 0.9"   # against the deployed model
+```
+
+CI runs the dataset on every push against the image it has just built, with
+Qwen2.5-0.5B pinned by revision and SHA-256, and fails below 85%. The
+[baseline](evals/baselines/qwen2.5-0.5b-instruct-q2_k.json) for that model is
+18/20, identical across runs; its two failures are the model's own (it names
+`NodeSelector` as the component that assigns pods to nodes, and wraps an
+extracted address in a sentence).
+
 ## Load Testing
 
 `scripts/loadgen.py` measures latency from the client side: end to end, and for
@@ -592,6 +621,7 @@ vortex-inference/
 │   │       └── servicemonitor.yaml    # ServiceMonitor/PodMonitor CRDs — scrape config
 │   └── overlays/
 │       └── remote/           # Remote-backend profile: patches over base/
+├── evals/                    # Evaluation datasets and recorded baselines
 ├── scripts/
 │   ├── setup-minikube.sh     # Cluster bootstrap: Minikube + KEDA + kube-prometheus-stack
 │   ├── download-model.sh     # Pinned-revision GGUF download, SHA-256 verified, resumable
