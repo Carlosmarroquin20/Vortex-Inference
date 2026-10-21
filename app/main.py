@@ -64,7 +64,7 @@ from app.completions import (
 from app.config import Settings
 from app.jobs.api import JobServices
 from app.jobs.api import router as jobs_router
-from app.jobs.queue import RabbitMQJobQueue
+from app.jobs.queue import RabbitMQJobQueue, job_topology
 from app.jobs.store import RedisJobStore
 from app.logging_config import (
     RequestContextMiddleware,
@@ -232,8 +232,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ),
             queue=RabbitMQJobQueue(
                 settings.rabbitmq_url.get_secret_value(),
-                queue=settings.jobs_queue,
-                max_attempts=settings.job_max_attempts,
+                topology=job_topology(settings),
                 timeout_seconds=settings.jobs_service_timeout_seconds,
             ),
         )

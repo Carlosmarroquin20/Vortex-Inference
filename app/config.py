@@ -149,10 +149,20 @@ class Settings(BaseSettings):
     # its last update. It also bounds how long an Idempotency-Key is honoured.
     job_ttl_seconds: int = Field(default=86400, ge=60, le=7 * 86400)
 
-    # Deliveries of one job before RabbitMQ moves it to the dead-letter queue.
-    # Covers workers that crash or are killed mid-job, so a message that
-    # brings a worker down cannot loop forever.
+    # Attempts a job gets before it is marked failed. Transient upstream
+    # failures (overload, rate limits, timeouts) are retried by the worker,
+    # and RabbitMQ dead-letters a message delivered this many times without
+    # an acknowledgement, so a job that keeps bringing workers down cannot
+    # loop forever either.
     job_max_attempts: int = Field(default=3, ge=1, le=20)
+
+    # Wait before the second attempt; it doubles for each attempt after
+    # that, up to an hour. Each distinct delay is its own RabbitMQ queue
+    # (see app/jobs/queue.py).
+    job_retry_delay_seconds: int = Field(default=10, ge=1, le=3600)
+
+    # Port of the worker's Prometheus endpoint (python -m app.worker).
+    worker_metrics_port: int = Field(default=9090, ge=1, le=65535)
 
     # Bound on each call to RabbitMQ or Redis from the API, so an unreachable
     # service turns into a prompt 503 instead of a hung request.

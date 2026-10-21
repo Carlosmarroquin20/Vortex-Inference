@@ -6,7 +6,7 @@ import fakeredis
 import pytest
 
 from app.jobs.models import Job
-from app.jobs.queue import declare_topology
+from app.jobs.queue import JobTopology, declare_topology
 from app.jobs.store import JobStoreUnavailable, RedisJobStore
 
 TTL = 3600
@@ -126,12 +126,15 @@ class RecordingChannel:
         return Queue()
 
 
+TOPOLOGY = JobTopology("vortex.jobs", max_attempts=3, retry_delay_seconds=10)
+
+
 def test_topology_uses_quorum_queues_with_a_delivery_limit():
     channel = RecordingChannel()
 
-    exchange = run(declare_topology(channel, "vortex.jobs", max_attempts=3))
+    declared = run(declare_topology(channel, TOPOLOGY))
 
-    assert exchange == "vortex.jobs"
+    assert declared.exchange == "vortex.jobs"
     assert channel.queues["vortex.jobs"] == {
         "durable": True,
         "arguments": {
@@ -147,6 +150,35 @@ def test_topology_uses_quorum_queues_with_a_delivery_limit():
         ("vortex.jobs", "vortex.jobs", "vortex.jobs"),
         ("vortex.jobs.dead", "vortex.jobs.dlx", "vortex.jobs"),
     }
+
+
+def test_retry_queues_dead_letter_back_to_the_jobs_exchange():
+    channel = RecordingChannel()
+
+    run(declare_topology(channel, TOPOLOGY))
+
+    # One queue per delay, doubling, for each attempt that can be retried.
+    retry = {name: q for name, q in channel.queues.items() if ".retry." in name}
+    assert set(retry) == {"vortex.jobs.retry.10s", "vortex.jobs.retry.20s"}
+    assert retry["vortex.jobs.retry.20s"]["arguments"] == {
+        "x-queue-type": "quorum",
+        "x-message-ttl": 20_000,
+        "x-dead-letter-exchange": "vortex.jobs",
+        "x-dead-letter-routing-key": "vortex.jobs",
+        "x-dead-letter-strategy": "at-least-once",
+        "x-overflow": "reject-publish",
+    }
+
+
+def test_retry_delays_double_up_to_a_cap():
+    topology = JobTopology("q", max_attempts=20, retry_delay_seconds=10)
+
+    assert [topology.retry_delay(n) for n in (1, 2, 3)] == [10, 20, 40]
+    assert topology.retry_delay(19) == 3600
+    assert topology.retry_queue(2) == "q.retry.20s"
+    # Capped delays share a queue.
+    assert len(topology.retry_queues()) < 19
+    assert JobTopology("q", max_attempts=1, retry_delay_seconds=10).retry_queues() == {}
 
 
 class FakeExchange:
@@ -181,6 +213,7 @@ class FakeConnection:
 def broker(monkeypatch):
     """Replaces aio_pika.connect_robust; records each connection attempt."""
     import app.jobs.queue as queue_module
+    from app.jobs.queue import DeclaredTopology
 
     state = {"connects": [], "exchange": FakeExchange(), "fail_connect": None}
 
@@ -191,8 +224,8 @@ def broker(monkeypatch):
         state["connects"].append((url, kwargs, connection))
         return connection
 
-    async def fake_topology(channel, queue, max_attempts):
-        return state["exchange"]
+    async def fake_topology(channel, topology):
+        return DeclaredTopology(state["exchange"], None)
 
     monkeypatch.setattr(queue_module.aio_pika, "connect_robust", fake_connect)
     monkeypatch.setattr(queue_module, "declare_topology", fake_topology)
@@ -202,7 +235,7 @@ def broker(monkeypatch):
 def make_queue():
     from app.jobs.queue import RabbitMQJobQueue
 
-    return RabbitMQJobQueue("amqp://u:p@host/", "vortex.jobs", 3, timeout_seconds=2.0)
+    return RabbitMQJobQueue("amqp://u:p@host/", TOPOLOGY, timeout_seconds=2.0)
 
 
 def message(job_id="job_" + "2" * 32):

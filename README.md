@@ -361,15 +361,45 @@ curl -s "http://${INFERENCE_IP}/v1/jobs/job_3f9c..." -H "Authorization: Bearer $
   retry after a timeout without running the request twice.
 - **Lifetime.** Records expire `VORTEX_JOB_TTL_SECONDS` (24h) after their last
   update; an unknown and an expired job both answer 404.
+- **Retries.** Transient upstream failures (overload, rate limits, timeouts,
+  unreachable provider) are retried up to `VORTEX_JOB_MAX_ATTEMPTS` (3) in
+  total, after `VORTEX_JOB_RETRY_DELAY_SECONDS` (10s) and doubling. The job
+  shows `queued` with the last attempt's `error` while it waits. Rejections,
+  internal errors and local deadline overruns fail at once: they would fail
+  the same way again.
 - **Poison messages.** The quorum queue counts deliveries: a job delivered
   `VORTEX_JOB_MAX_ATTEMPTS` times without completing (its worker crashed each
-  time) moves to the `vortex.jobs.dead` queue instead of looping.
+  time) is marked failed and moves to the `vortex.jobs.dead` queue instead of
+  looping, as does a message the worker cannot parse.
 - **Status values**: `queued`, `running`, `succeeded` (with `result`) and
   `failed` (with `error`: the status code and message the endpoint would have
   answered with).
 
 Jobs are off unless `VORTEX_JOBS_ENABLED=true`, with `VORTEX_RABBITMQ_URL` and
 `VORTEX_REDIS_URL` set.
+
+### Worker
+
+`python -m app.worker` runs the jobs. It is the same image and configuration
+as the API, so it loads the same backend, and takes up to
+`VORTEX_MAX_CONCURRENT_REQUESTS` jobs at a time (its RabbitMQ prefetch).
+
+- **At-least-once.** A delivery is acknowledged only after its outcome is in
+  Redis. If Redis is unreachable the job is put back through the retry queue
+  without using an attempt and runs once Redis returns; a redelivered job that
+  had already finished is skipped.
+- **Retry queues.** A retry is published to `vortex.jobs.retry.<delay>s`, a
+  queue with no consumers whose TTL dead-letters the job back to the jobs
+  exchange. There is one queue per delay because RabbitMQ only expires
+  messages at the head of a queue.
+- **Shutdown.** On SIGTERM the worker stops consuming, lets jobs in progress
+  finish (up to `VORTEX_INFERENCE_TIMEOUT_SECONDS` plus 15s) and exits; jobs
+  still running at the deadline are stopped and redelivered elsewhere.
+- **Metrics** on `VORTEX_WORKER_METRICS_PORT` (9090):
+  `vortex_worker_jobs_total{outcome}`, `vortex_worker_job_duration_seconds`,
+  `vortex_worker_job_wait_seconds` (submission to first attempt) and
+  `vortex_worker_jobs_in_progress`. Its log lines carry the job ID in
+  `request_id`.
 
 ## Load Testing
 
@@ -462,11 +492,13 @@ sum(rate(vortex_inference_requests_total{status=~"error|timeout"}[5m])) / sum(ra
 vortex-inference/
 ├── app/
 │   ├── main.py               # FastAPI server — lifecycle, both endpoints, request execution
+│   ├── worker.py             # Job worker entry point (python -m app.worker)
+│   ├── completions.py        # Request-to-response pieces shared by the API and the worker
 │   ├── schemas.py            # OpenAI-compatible request and response models
 │   ├── metrics.py            # Prometheus metric definitions
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
 │   ├── logging_config.py     # logfmt formatter + request ID middleware
-│   ├── jobs/                 # Asynchronous jobs: API, RabbitMQ queue, Redis store
+│   ├── jobs/                 # Asynchronous jobs: API, RabbitMQ topology, Redis store, processor
 │   └── backends/
 │       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND
 │       ├── base.py           # InferenceBackend protocol shared by every engine

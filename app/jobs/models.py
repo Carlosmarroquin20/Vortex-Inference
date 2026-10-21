@@ -75,11 +75,13 @@ class Job(BaseModel):
     created_at: int = Field(default_factory=lambda: int(time.time()))
     started_at: int | None = None
     finished_at: int | None = None
-    # Deliveries to a worker so far; above 1 means a retry.
+    # Attempts started so far; above 1 means a retry.
     attempts: int = 0
     # The endpoint's response body (a text_completion or chat.completion
     # object) once the job has succeeded.
     result: dict[str, Any] | None = None
+    # Why the job failed or, while it is queued for a retry, why its last
+    # attempt did.
     error: JobError | None = None
 
 

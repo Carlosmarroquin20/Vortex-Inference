@@ -106,3 +106,39 @@ JOB_SUBMISSION_FAILURES_TOTAL = Counter(
     "store or the RabbitMQ queue.",
     ["component"],  # "store" | "queue"
 )
+
+# Worker metrics (python -m app.worker). The worker runs the backend too, but
+# does not record the vortex_inference_* request series: those describe the
+# synchronous API, which the latency and error SLOs are defined on.
+
+WORKER_JOBS_TOTAL = Counter(
+    "vortex_worker_jobs_total",
+    "Job deliveries handled by the worker, by how each one ended: succeeded "
+    "and failed are final; retried means a transient failure with attempts "
+    "left; deferred means Redis was unreachable and the job was put back "
+    "without using an attempt; skipped means the job had already finished "
+    "or expired; rejected means the message was unreadable and was "
+    "dead-lettered.",
+    ["outcome"],
+)
+
+WORKER_JOB_DURATION_SECONDS = Histogram(
+    "vortex_worker_job_duration_seconds",
+    "Time one attempt spent in the backend, by its result: succeeded, "
+    "failed or retried.",
+    ["outcome"],
+    buckets=[0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
+)
+
+WORKER_JOB_WAIT_SECONDS = Histogram(
+    "vortex_worker_job_wait_seconds",
+    "Time from a job's submission until its first attempt started: the "
+    "backlog a client waits behind. Second resolution, as the job records "
+    "store their timestamps.",
+    buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, float("inf")],
+)
+
+WORKER_JOBS_IN_PROGRESS = Gauge(
+    "vortex_worker_jobs_in_progress",
+    "Jobs the worker has received and not yet acknowledged.",
+)
