@@ -59,6 +59,10 @@ from app.backends import (
     create_backend,
 )
 from app.config import Settings
+from app.jobs.api import JobServices
+from app.jobs.api import router as jobs_router
+from app.jobs.queue import RabbitMQJobQueue
+from app.jobs.store import RedisJobStore
 from app.logging_config import (
     RequestContextMiddleware,
     configure_logging,
@@ -218,6 +222,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.info("API key authentication enabled for /v1/completions.")
 
+    if settings.jobs_enabled:
+        # Neither service is contacted here: connections open on first use,
+        # so the synchronous endpoints start and serve even while RabbitMQ
+        # or Redis is down, and job requests answer 503 meanwhile.
+        app.state.jobs = JobServices(
+            store=RedisJobStore(
+                settings.redis_url.get_secret_value(),
+                ttl_seconds=settings.job_ttl_seconds,
+                timeout_seconds=settings.jobs_service_timeout_seconds,
+            ),
+            queue=RabbitMQJobQueue(
+                settings.rabbitmq_url.get_secret_value(),
+                queue=settings.jobs_queue,
+                max_attempts=settings.job_max_attempts,
+                timeout_seconds=settings.jobs_service_timeout_seconds,
+            ),
+        )
+        logger.info("Asynchronous jobs enabled.", extra={"queue": settings.jobs_queue})
+    else:
+        app.state.jobs = None
+
     yield  # ← Application serves traffic here
 
     # Graceful shutdown. uvicorn has stopped accepting connections and waited
@@ -244,6 +269,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # again; the process exits regardless.
     _inference_executor.shutdown(wait=False, cancel_futures=True)
     backend.close()
+    if app.state.jobs is not None:
+        await app.state.jobs.queue.close()
+        await app.state.jobs.store.close()
     logger.info("Shutdown complete.")
 
 
@@ -304,6 +332,10 @@ async def require_api_key(
             detail="Invalid or missing API key.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+# Job endpoints live in app/jobs/api.py and take the same bearer token.
+app.include_router(jobs_router, dependencies=[Depends(require_api_key)])
 
 
 # ---------------------------------------------------------------------------

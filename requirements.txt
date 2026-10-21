@@ -33,3 +33,8 @@ httpx2==2.13.1
 # Official SDK for the anthropic backend (app/backends/anthropic_api.py). The
 # 1.x line runs on httpx2, so it shares the client pinned above.
 anthropic==1.13.0
+
+# Asynchronous jobs (app/jobs): RabbitMQ client with publisher confirms and
+# automatic reconnection, and the Redis client for job state.
+aio-pika==10.1.1
+redis==8.1.0

@@ -181,3 +181,70 @@ class FakeChatFormatter:
             stopping_criteria=stopping_criteria,
             added_special=True,
         )
+
+
+class InMemoryJobStore:
+    """JobStore with the Redis semantics the API relies on, minus TTLs."""
+
+    def __init__(self) -> None:
+        self.jobs: dict = {}
+        self.idempotency: dict[str, str] = {}
+        self.unavailable = False
+
+    def _check(self) -> None:
+        from app.jobs.store import JobStoreUnavailable
+
+        if self.unavailable:
+            raise JobStoreUnavailable("store down")
+
+    async def create(self, job) -> None:
+        self._check()
+        if job.id in self.jobs:
+            raise ValueError("exists")
+        self.jobs[job.id] = job.model_copy(deep=True)
+
+    async def save(self, job) -> None:
+        self._check()
+        self.jobs[job.id] = job.model_copy(deep=True)
+
+    async def get(self, job_id):
+        self._check()
+        job = self.jobs.get(job_id)
+        return job.model_copy(deep=True) if job is not None else None
+
+    async def delete(self, job_id) -> None:
+        self._check()
+        self.jobs.pop(job_id, None)
+
+    async def claim_idempotency_key(self, key, job_id):
+        self._check()
+        if key in self.idempotency:
+            return self.idempotency[key]
+        self.idempotency[key] = job_id
+        return None
+
+    async def release_idempotency_key(self, key) -> None:
+        self._check()
+        self.idempotency.pop(key, None)
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeJobQueue:
+    """JobQueue that records published messages."""
+
+    def __init__(self) -> None:
+        self.messages: list = []
+        self.unavailable = False
+        self.closed = False
+
+    async def publish(self, message) -> None:
+        from app.jobs.queue import JobQueueUnavailable
+
+        if self.unavailable:
+            raise JobQueueUnavailable("broker down")
+        self.messages.append(message)
+
+    async def close(self) -> None:
+        self.closed = True

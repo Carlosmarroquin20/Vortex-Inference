@@ -92,3 +92,17 @@ MODEL_LOAD_DURATION_SECONDS = Gauge(
     "memory contention during init — a risk factor in pod restart storms where "
     "multiple replicas start simultaneously on a memory-constrained node.",
 )
+
+JOBS_SUBMITTED_TOTAL = Counter(
+    "vortex_jobs_submitted_total",
+    "Asynchronous jobs accepted and confirmed by RabbitMQ, by endpoint. "
+    "Idempotent replays of an earlier submission are not counted.",
+    ["url"],
+)
+
+JOB_SUBMISSION_FAILURES_TOTAL = Counter(
+    "vortex_job_submission_failures_total",
+    "Job submissions answered 503 because a dependency failed: the Redis "
+    "store or the RabbitMQ queue.",
+    ["component"],  # "store" | "queue"
+)

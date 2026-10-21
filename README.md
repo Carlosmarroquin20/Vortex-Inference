@@ -330,6 +330,47 @@ them with `kubectl delete -f k8s/base/model-pv.yaml` if they are no longer neede
 
 ---
 
+## Asynchronous Jobs
+
+For work that does not need an immediate answer (offline evaluation,
+summarizing a backlog, anything a client would otherwise hold a connection
+open for), `POST /v1/jobs` queues a request in RabbitMQ and answers at once;
+a worker runs it and `GET /v1/jobs/{id}` returns the result from Redis. The
+submission names the endpoint and carries the body it accepts, as in OpenAI's
+Batch API, so a job's result has exactly the shape that endpoint would return.
+
+```bash
+curl -s -X POST "http://${INFERENCE_IP}/v1/jobs" \
+  -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: report-2026-10-21" \
+  -d '{"url": "/v1/chat/completions",
+       "body": {"messages": [{"role": "user", "content": "Summarize..."}]}}'
+# 202 {"id": "job_3f9c...", "object": "job", "status": "queued", ...}
+
+curl -s "http://${INFERENCE_IP}/v1/jobs/job_3f9c..." -H "Authorization: Bearer ${API_KEY}"
+# {"status": "succeeded", "result": {"object": "chat.completion", ...}, ...}
+```
+
+- **Durability.** The 202 is sent only after RabbitMQ confirms it has stored
+  the message (publisher confirms, persistent messages, quorum queues). If
+  RabbitMQ or Redis is unreachable the API answers 503 with `Retry-After`;
+  the synchronous endpoints keep working, since connections are opened on
+  first use and not at startup.
+- **Idempotency.** Repeating a submission with the same `Idempotency-Key`
+  returns the original job (200) instead of queueing it again, so a client can
+  retry after a timeout without running the request twice.
+- **Lifetime.** Records expire `VORTEX_JOB_TTL_SECONDS` (24h) after their last
+  update; an unknown and an expired job both answer 404.
+- **Poison messages.** The quorum queue counts deliveries: a job delivered
+  `VORTEX_JOB_MAX_ATTEMPTS` times without completing (its worker crashed each
+  time) moves to the `vortex.jobs.dead` queue instead of looping.
+- **Status values**: `queued`, `running`, `succeeded` (with `result`) and
+  `failed` (with `error`: the status code and message the endpoint would have
+  answered with).
+
+Jobs are off unless `VORTEX_JOBS_ENABLED=true`, with `VORTEX_RABBITMQ_URL` and
+`VORTEX_REDIS_URL` set.
+
 ## Load Testing
 
 `scripts/loadgen.py` measures latency from the client side: end to end, and for
@@ -425,6 +466,7 @@ vortex-inference/
 │   ├── metrics.py            # Prometheus metric definitions
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
 │   ├── logging_config.py     # logfmt formatter + request ID middleware
+│   ├── jobs/                 # Asynchronous jobs: API, RabbitMQ queue, Redis store
 │   └── backends/
 │       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND
 │       ├── base.py           # InferenceBackend protocol shared by every engine

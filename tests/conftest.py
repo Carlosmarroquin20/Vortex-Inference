@@ -35,6 +35,7 @@ _TEST_ENV = {
     "VORTEX_INFERENCE_TIMEOUT_SECONDS": "5",
     "VORTEX_API_KEY": "",
     "VORTEX_ENABLE_DOCS": "false",
+    "VORTEX_JOBS_ENABLED": "false",
 }
 os.environ.update(_TEST_ENV)
 

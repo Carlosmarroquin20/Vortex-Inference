@@ -17,6 +17,9 @@ pytest-cov==7.1.0
 # claim. Pinned to a release whose schema was verified against the server.
 openai==3.29.0
 
+# In-process Redis for the job store tests (redis.asyncio compatible).
+fakeredis==2.39.0
+
 ruff==0.17.0
 
 # Dependency vulnerability audit, run in CI and on the weekly schedule.

@@ -126,6 +126,38 @@ class Settings(BaseSettings):
     # for models or gateways that reject the parameter.
     anthropic_refusal_fallback: bool = True
 
+    # --- Asynchronous Jobs ---
+    # POST /v1/jobs queues a completion in RabbitMQ for a worker to run, and
+    # GET /v1/jobs/{id} reads its state and result from Redis. Off by default:
+    # the synchronous endpoints need neither service.
+    jobs_enabled: bool = False
+
+    # Connection URLs carry credentials, hence SecretStr: they never appear in
+    # reprs or logs. amqp(s)://user:password@host:5672/vhost and
+    # redis(s)://:password@host:6379/0.
+    rabbitmq_url: SecretStr | None = None
+    redis_url: SecretStr | None = None
+
+    # Queue (and routing key) the jobs are published to. Its arguments are
+    # fixed when RabbitMQ first creates it; changing job_max_attempts later
+    # requires deleting the queue, or the declaration is refused.
+    jobs_queue: str = Field(
+        default="vortex.jobs", pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$"
+    )
+
+    # How long a job's record, and with it its result, stays readable after
+    # its last update. It also bounds how long an Idempotency-Key is honoured.
+    job_ttl_seconds: int = Field(default=86400, ge=60, le=7 * 86400)
+
+    # Deliveries of one job before RabbitMQ moves it to the dead-letter queue.
+    # Covers workers that crash or are killed mid-job, so a message that
+    # brings a worker down cannot loop forever.
+    job_max_attempts: int = Field(default=3, ge=1, le=20)
+
+    # Bound on each call to RabbitMQ or Redis from the API, so an unreachable
+    # service turns into a prompt 503 instead of a hung request.
+    jobs_service_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+
     # --- Server Configuration ---
     port: int = Field(default=8080, ge=1, le=65535)
 
@@ -151,6 +183,8 @@ class Settings(BaseSettings):
         "remote_api_key",
         "remote_base_url",
         "anthropic_effort",
+        "rabbitmq_url",
+        "redis_url",
         mode="before",
     )
     @classmethod
@@ -190,6 +224,42 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"{', '.join(missing)} must be set when VORTEX_BACKEND is "
                 f"{self.backend!r}."
+            )
+        return self
+
+    @field_validator("rabbitmq_url")
+    @classmethod
+    def rabbitmq_url_must_be_amqp(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is not None and not v.get_secret_value().startswith(
+            ("amqp://", "amqps://")
+        ):
+            raise ValueError("rabbitmq_url must start with amqp:// or amqps://")
+        return v
+
+    @field_validator("redis_url")
+    @classmethod
+    def redis_url_must_be_redis(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is not None and not v.get_secret_value().startswith(
+            ("redis://", "rediss://")
+        ):
+            raise ValueError("redis_url must start with redis:// or rediss://")
+        return v
+
+    @model_validator(mode="after")
+    def jobs_require_services(self) -> "Settings":
+        if not self.jobs_enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("VORTEX_RABBITMQ_URL", self.rabbitmq_url),
+                ("VORTEX_REDIS_URL", self.redis_url),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"{', '.join(missing)} must be set when VORTEX_JOBS_ENABLED is true."
             )
         return self
 
