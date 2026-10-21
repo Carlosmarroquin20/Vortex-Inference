@@ -48,9 +48,13 @@ class FakeLlama:
         self.calls: list[dict[str, object]] = []
         self.steps_run: list[int] = []
         self.active_calls = 0
+        self.resets = 0
         self.max_active_calls = 0
         self.started = threading.Event()
         self._lock = threading.Lock()
+
+    def reset(self) -> None:
+        self.resets += 1
 
     def tokenize(self, text: bytes, add_bos: bool = True, special: bool = False):
         # One token per whitespace-separated word keeps context-window

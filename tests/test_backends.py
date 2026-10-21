@@ -28,3 +28,31 @@ def test_factory_rejects_a_backend_without_an_implementation():
 
     with pytest.raises(ValueError, match="Unsupported inference backend"):
         create_backend(settings)
+
+
+def test_prompt_processing_uses_the_generation_thread_count():
+    backend = LlamaCppBackend(Settings().model_copy(update={"n_threads": 3}))
+
+    kwargs = backend._model.init_kwargs
+    # Not llama-cpp-python's default of os.cpu_count(), which ignores the
+    # container's CPU limit.
+    assert kwargs["n_threads"] == kwargs["n_threads_batch"] == 3
+
+
+def test_warm_up_generates_one_token_and_clears_the_context():
+    from tests.helpers import metric
+
+    backend = LlamaCppBackend(Settings().model_copy(update={"warmup": True}))
+
+    model = backend._model
+    (call,) = model.calls
+    assert call["max_tokens"] == 1
+    assert model.resets == 1
+    assert backend.is_ready()
+    assert metric("vortex_model_warmup_duration_seconds") >= 0
+
+
+def test_warm_up_can_be_turned_off():
+    backend = LlamaCppBackend(Settings().model_copy(update={"warmup": False}))
+
+    assert backend._model.calls == []

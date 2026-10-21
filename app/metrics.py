@@ -93,6 +93,14 @@ MODEL_LOAD_DURATION_SECONDS = Gauge(
     "multiple replicas start simultaneously on a memory-constrained node.",
 )
 
+MODEL_WARMUP_DURATION_SECONDS = Gauge(
+    "vortex_model_warmup_duration_seconds",
+    "Time the startup warm-up generation took (llama_cpp only): mostly "
+    "reading the memory-mapped weights from disk, which the first request "
+    "would otherwise pay for. Close to a normal one-token request when the "
+    "file was already in the node's page cache.",
+)
+
 JOBS_SUBMITTED_TOTAL = Counter(
     "vortex_jobs_submitted_total",
     "Asynchronous jobs accepted and confirmed by RabbitMQ, by endpoint. "

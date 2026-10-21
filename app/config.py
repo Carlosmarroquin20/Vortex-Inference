@@ -57,7 +57,13 @@ class Settings(BaseSettings):
     # Using the limit value risks throttling during burst inference, which
     # causes latency spikes that look like application bugs in dashboards.
     # The relationship: n_threads=2 → ~1.5–2 tok/s on modern x86 with OpenBLAS.
+    # Prompt processing uses the same count (see app/backends/llamacpp.py).
     n_threads: int = Field(default=2, ge=1)
+
+    # Generate one token at startup, before the pod reports ready, so the
+    # first request does not pay for reading the memory-mapped weights from
+    # disk. llama_cpp only.
+    warmup: bool = True
 
     # Number of layers to offload to the GPU; -1 offloads all of them. It only
     # has an effect when llama-cpp-python was compiled with a GPU backend.

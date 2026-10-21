@@ -36,6 +36,9 @@ data:
   # n_threads=2 matches the pod's CPU request (2000m = 2 vCPU).
   # Aligning thread count to CPU requests rather than limits prevents
   # throttling-induced latency spikes under CFS scheduling pressure.
+  # It also sizes llama.cpp's prompt-processing threads, which would
+  # otherwise default to the node's CPU count (see the README's notes on
+  # thread counts).
   VORTEX_N_THREADS: "2"
 
   # Thread pools of the native libraries must match VORTEX_N_THREADS.

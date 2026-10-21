@@ -25,6 +25,7 @@ from app.backends.base import (
     TextDelta,
 )
 from app.config import Settings
+from app.metrics import MODEL_WARMUP_DURATION_SECONDS
 
 logger = logging.getLogger("vortex.backends.llamacpp")
 
@@ -79,13 +80,46 @@ class LlamaCppBackend:
             model_path=settings.model_path,
             n_ctx=settings.n_ctx,
             n_threads=settings.n_threads,
+            # Prompt processing gets the same threads as generation. Left
+            # unset, llama-cpp-python uses os.cpu_count(), which inside a
+            # container is the node's CPU count rather than the pod's limit:
+            # 12 threads on a 2-CPU quota, throttled by the kernel. Measured
+            # with Qwen2.5-0.5B under --cpus 2: prompt processing went from
+            # 11.5 to 115 tokens/s (scripts/bench_llama.py), streamed time to
+            # first token from 1.18s to 0.16s at the median, and the first
+            # request after startup from 35s to 1.5s; generation unchanged.
+            n_threads_batch=settings.n_threads,
             n_gpu_layers=settings.n_gpu_layers,
             verbose=False,
         )
         self._chat_formatter = self._load_chat_formatter()
+        if settings.warmup:
+            self._warm_up()
 
         self._ready = True
         logger.info("Model successfully loaded into memory and ready for inference.")
+
+    def _warm_up(self) -> None:
+        """
+        Generates one token before the backend reports ready.
+
+        The weights are memory-mapped, so loading only maps the file: on a
+        node whose page cache does not hold it, each page is read from disk
+        the first time inference touches it, and the first request would pay
+        for reading the whole model. llama.cpp's own tools run the same
+        warm-up for that reason. One token runs every layer, which reads every
+        weight; only the rows of the token embedding table that the warm-up
+        prompt does not use stay unread, a small fraction of the file. With
+        the file already cached it costs about 40ms (Qwen2.5-0.5B, 2 CPUs).
+        """
+        started = time.monotonic()
+        self._model("Hello", max_tokens=1, temperature=0.0)
+        # The warm-up prompt stays in llama-cpp-python's prefix cache
+        # otherwise; requests should start from an empty context.
+        self._model.reset()
+        duration = time.monotonic() - started
+        MODEL_WARMUP_DURATION_SECONDS.set(duration)
+        logger.info("Model warmed up.", extra={"duration_seconds": round(duration, 2)})
 
     def is_ready(self) -> bool:
         """

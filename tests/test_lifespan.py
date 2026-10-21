@@ -28,6 +28,7 @@ def test_model_is_loaded_with_configured_parameters(fake_model):
         "model_path": "/models/test-model.gguf",
         "n_ctx": 64,
         "n_threads": 1,
+        "n_threads_batch": 1,
         "n_gpu_layers": 0,
         "verbose": False,
     }

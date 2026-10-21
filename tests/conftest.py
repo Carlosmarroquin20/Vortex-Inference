@@ -36,6 +36,9 @@ _TEST_ENV = {
     "VORTEX_API_KEY": "",
     "VORTEX_ENABLE_DOCS": "false",
     "VORTEX_JOBS_ENABLED": "false",
+    # Off so call counts on the fake model only reflect the test's requests;
+    # tests/test_backends.py covers the warm-up itself.
+    "VORTEX_WARMUP": "false",
 }
 os.environ.update(_TEST_ENV)
 

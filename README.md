@@ -77,7 +77,29 @@ With `threshold: 3`, a queue of 7 concurrent requests produces `ceil(7/3) = 3 re
 
 Model loading takes 60–90s from pod creation to readiness probe passing. Scaling in too eagerly causes flapping: a pod is removed during a brief lull, then must be re-provisioned when the next burst arrives — paying the full startup cost again. The HPA that KEDA manages keeps the highest replica count recommended over the last five minutes (`scaleDown.stabilizationWindowSeconds: 300`) and then removes at most one pod per minute, at the cost of slightly higher idle resource usage.
 
-KEDA's own `cooldownPeriod` is not used: with `minReplicaCount: 1` it only governs scaling to and from zero, which this workload never does.
+KEDA's own `cooldownPeriod` is not used: with `minReplicaCount: 1` it only governs scaling to and from zero, which this workload never does. The job workers do scale to zero, and use it (see [Asynchronous Jobs](#asynchronous-jobs)).
+
+### Thread counts follow the CPU limit, not the node
+
+Inside a container, `os.cpu_count()` reports the node's CPUs, not the pod's quota. Every native thread pool sized from it oversubscribes the quota and gets throttled by the kernel: OpenBLAS and OpenMP (capped through `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS` in the ConfigMap) and llama.cpp's prompt-processing threads, which llama-cpp-python defaults to `os.cpu_count()` when only `n_threads` is given. The backend passes `n_threads_batch=n_threads`. Measured with Qwen2.5-0.5B under a 2-CPU limit on a 12-CPU host:
+
+| | `n_threads_batch` unset (12) | `n_threads_batch=2` |
+|---|---|---|
+| Prompt processing ([`scripts/bench_llama.py`](scripts/bench_llama.py)) | 11.5 tok/s | 115 tok/s |
+| Generation | 40.1 tok/s | 38.6 tok/s |
+| Streamed time to first token, P50 / P95 (`scripts/loadgen.py`) | 1.18s / 2.39s | 0.16s / 0.24s |
+| First request after startup | 35.2s | 1.5s |
+
+The same measurements show the BLAS backend, which ggml uses for prompt processing in batches of 32 tokens and more, gaining nothing for a model this small (135 tok/s with `n_batch=16`, which keeps it out). Re-run the benchmark against the deployed model before changing the build:
+
+```bash
+docker run --rm --cpus 2 -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=2 \
+  -v ./models:/models:ro -v ./scripts:/bench:ro --entrypoint python vortex-inference:1.0.0 \
+  /bench/bench_llama.py --model /models/phi-3-mini-4k-instruct-q4_k_m.gguf \
+  --threads 2 --threads-batch 2,0 --batch 512,16
+```
+
+The server also generates one token at startup (`VORTEX_WARMUP`, on by default) before it reports ready, so a node that has not cached the memory-mapped weights reads them then rather than during the first request.
 
 ### Memory limit: 4Gi hard ceiling
 
