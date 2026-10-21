@@ -47,16 +47,19 @@ from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from app.backends import (
-    BackendError,
-    GenerationResult,
     InferenceBackend,
-    Prompt,
-    PromptTooLongError,
-    RequestRejectedError,
     StreamEnd,
     StreamEvent,
     TextDelta,
     create_backend,
+)
+from app.completions import (
+    Finished,
+    Generation,
+    chat_completion_response,
+    classify_failure,
+    completion_response,
+    timeout_detail,
 )
 from app.config import Settings
 from app.jobs.api import JobServices
@@ -80,15 +83,10 @@ from app.metrics import (
     TOKENS_PER_SECOND,
 )
 from app.schemas import (
-    ChatCompletionChoice,
-    ChatCompletionMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
-    CompletionChoice,
-    CompletionPerformance,
     CompletionRequest,
     CompletionResponse,
-    CompletionUsage,
     HealthResponse,
     LivenessResponse,
 )
@@ -345,66 +343,21 @@ app.include_router(jobs_router, dependencies=[Depends(require_api_key)])
 # treated as wedged rather than slow to observe its stop event.
 STALL_GRACE_SECONDS = 60.0
 
-# Client-facing text for BackendError, by status. The exception message holds
-# the upstream details and goes to the log only.
-_BACKEND_ERROR_DETAIL = {
-    502: "The inference backend failed to produce a completion.",
-    503: "The inference backend is overloaded. Retry later.",
-    504: "The inference backend did not respond in time.",
-}
-
 
 def _timeout_detail() -> str:
-    return (
-        f"Inference exceeded {settings.inference_timeout_seconds}s timeout. "
-        "Reduce max_tokens or retry when the service has scaled out."
-    )
+    return timeout_detail(settings.inference_timeout_seconds)
 
 
 def _classify_failure(exc: Exception) -> tuple[str, HTTPException]:
     """
-    Maps a backend failure to its metric outcome and client response, and
-    logs it. Shared by buffered and streamed requests, so a failure is
-    reported the same way whichever the client asked for.
+    The metric outcome and client response for a backend failure. Shared by
+    buffered and streamed requests, so a failure is reported the same way
+    whichever the client asked for.
     """
-    if isinstance(exc, RequestRejectedError):
-        # A client error, not a service failure: counted separately so it
-        # does not inflate the error-ratio SLO.
-        details = (
-            {"tokens_prompt": exc.prompt_tokens, "n_ctx": exc.n_ctx}
-            if isinstance(exc, PromptTooLongError)
-            else {}
-        )
-        logger.info("Request rejected.", extra={"reason": str(exc), **details})
-        return "rejected", HTTPException(status_code=400, detail=str(exc))
-
-    if isinstance(exc, BackendError):
-        # Upstream timeouts share the "timeout" status with local deadline
-        # overruns so the latency SLO sees both.
-        outcome = "timeout" if exc.status_code == 504 else "error"
-        logger.error(
-            "Inference backend failed.",
-            extra={"reason": str(exc), "status_code": exc.status_code},
-        )
-        headers = (
-            {"Retry-After": exc.retry_after}
-            if exc.status_code == 503 and exc.retry_after
-            else None
-        )
-        return outcome, HTTPException(
-            status_code=exc.status_code,
-            detail=_BACKEND_ERROR_DETAIL.get(
-                exc.status_code, _BACKEND_ERROR_DETAIL[502]
-            ),
-            headers=headers,
-        )
-
-    # Full traceback goes to the server log only. Exception messages from
-    # llama.cpp and the OS routinely include file paths and allocator state,
-    # which should not be returned to API clients.
-    logger.error("Inference failed.", exc_info=exc)
-    return "error", HTTPException(
-        status_code=500, detail="Inference failed due to an internal error."
+    failure = classify_failure(exc)
+    headers = {"Retry-After": failure.retry_after} if failure.retry_after else None
+    return failure.outcome, HTTPException(
+        status_code=failure.status_code, detail=failure.detail, headers=headers
     )
 
 
@@ -516,13 +469,7 @@ async def create_completion(
     API for drop-in client compatibility without requiring SDK changes.
     """
     _require_engine()
-    generation = _Generation(
-        prompt=request.prompt,
-        max_tokens=request.max_tokens,
-        temperature=request.temperature,
-        top_p=request.top_p,
-        stop=request.stop,
-    )
+    generation = Generation.for_completion(request)
     completion_id = f"cmpl-{_request_id()}"
 
     if request.stream:
@@ -535,28 +482,7 @@ async def create_completion(
         )
 
     done = await _run_buffered(generation)
-    result = done.result
-    return CompletionResponse(
-        id=completion_id,
-        created=int(time.time()),
-        model=settings.model_name,
-        choices=[
-            CompletionChoice(
-                index=0,
-                text=result["text"],
-                finish_reason=result["finish_reason"],
-            )
-        ],
-        usage=CompletionUsage(
-            prompt_tokens=result["tokens_prompt"],
-            completion_tokens=result["tokens_completion"],
-            total_tokens=result["tokens_prompt"] + result["tokens_completion"],
-        ),
-        performance=CompletionPerformance(
-            tokens_per_second=round(done.tokens_per_second, 3),
-            duration_seconds=round(done.duration, 3),
-        ),
-    )
+    return completion_response(completion_id, settings.model_name, done)
 
 
 @app.post(
@@ -575,13 +501,7 @@ async def create_chat_completion(
     own chat template for llama_cpp, or by the provider's chat API.
     """
     _require_engine()
-    generation = _Generation(
-        prompt=request.conversation(),
-        max_tokens=request.completion_limit(),
-        temperature=request.temperature,
-        top_p=request.top_p,
-        stop=request.stop_sequences(),
-    )
+    generation = Generation.for_chat(request)
     completion_id = f"chatcmpl-{_request_id()}"
 
     if request.stream:
@@ -594,28 +514,7 @@ async def create_chat_completion(
         )
 
     done = await _run_buffered(generation)
-    result = done.result
-    return ChatCompletionResponse(
-        id=completion_id,
-        created=int(time.time()),
-        model=settings.model_name,
-        choices=[
-            ChatCompletionChoice(
-                index=0,
-                message=ChatCompletionMessage(content=result["text"]),
-                finish_reason=result["finish_reason"],
-            )
-        ],
-        usage=CompletionUsage(
-            prompt_tokens=result["tokens_prompt"],
-            completion_tokens=result["tokens_completion"],
-            total_tokens=result["tokens_prompt"] + result["tokens_completion"],
-        ),
-        performance=CompletionPerformance(
-            tokens_per_second=round(done.tokens_per_second, 3),
-            duration_seconds=round(done.duration, 3),
-        ),
-    )
+    return chat_completion_response(completion_id, settings.model_name, done)
 
 
 # ---------------------------------------------------------------------------
@@ -631,24 +530,6 @@ async def create_chat_completion(
 # true demand.
 
 
-@dataclass(frozen=True, slots=True)
-class _Generation:
-    """What a request asks the backend for, independent of its endpoint."""
-
-    prompt: Prompt
-    max_tokens: int
-    temperature: float
-    top_p: float
-    stop: list[str] | None
-
-
-@dataclass(frozen=True, slots=True)
-class _Finished:
-    result: GenerationResult
-    duration: float
-    tokens_per_second: float
-
-
 def _require_engine() -> None:
     if backend is None or _inference_semaphore is None or _inference_executor is None:
         raise HTTPException(status_code=503, detail="Inference engine not initialized.")
@@ -659,7 +540,7 @@ def _request_id() -> str:
     return request_id_var.get() or uuid.uuid4().hex
 
 
-async def _run_buffered(generation: _Generation) -> _Finished:
+async def _run_buffered(generation: Generation) -> Finished:
     """Runs a generation to completion; failures raise HTTPException."""
     # Increment before acquiring the semaphore so queued requests contribute to
     # the KEDA scaling signal. Do NOT move this inside the semaphore.
@@ -766,7 +647,7 @@ async def _run_buffered(generation: _Generation) -> _Finished:
                 "finish_reason": result["finish_reason"],
             },
         )
-        return _Finished(result=result, duration=duration, tokens_per_second=tps)
+        return Finished(result=result, duration=duration, tokens_per_second=tps)
 
     except HTTPException:
         raise
@@ -965,7 +846,7 @@ async def _next_event(
 
 
 async def _run_streamed(
-    generation: _Generation, chunks: _ChunkFormatter, include_usage: bool
+    generation: Generation, chunks: _ChunkFormatter, include_usage: bool
 ) -> StreamingResponse:
     """Serves a generation as server-sent events in the given chunk format."""
     # Counted while queued, as for buffered requests: this is KEDA's signal.
