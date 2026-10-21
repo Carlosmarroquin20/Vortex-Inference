@@ -132,6 +132,27 @@ class Settings(BaseSettings):
     # for models or gateways that reject the parameter.
     anthropic_refusal_fallback: bool = True
 
+    # --- Fallback Backend ---
+    # A second backend that takes a request the primary cannot serve: the
+    # primary is overloaded or rate limited, fails or times out upstream, or
+    # the prompt does not fit its context (a 4K local model handing a long
+    # prompt to a provider with a larger window). Unset disables fallback.
+    # The fallback shares every other setting with the primary; the
+    # fallback_remote_* values, when set, replace the remote ones for it, so
+    # a remote primary can fall back to a second provider.
+    fallback_backend: Literal["llama_cpp", "openai_compatible", "anthropic"] | None = (
+        None
+    )
+    fallback_model_name: str | None = None
+    fallback_remote_base_url: str | None = None
+    fallback_remote_api_key: SecretStr | None = None
+
+    # After this many consecutive primary failures, requests go straight to
+    # the fallback for fallback_cooldown_seconds instead of paying for each
+    # failure first; the next request after that tries the primary again.
+    fallback_failure_threshold: int = Field(default=3, ge=1)
+    fallback_cooldown_seconds: float = Field(default=30.0, gt=0)
+
     # --- Asynchronous Jobs ---
     # POST /v1/jobs queues a completion in RabbitMQ for a worker to run, and
     # GET /v1/jobs/{id} reads its state and result from Redis. Off by default:
@@ -199,6 +220,10 @@ class Settings(BaseSettings):
         "remote_api_key",
         "remote_base_url",
         "anthropic_effort",
+        "fallback_backend",
+        "fallback_model_name",
+        "fallback_remote_base_url",
+        "fallback_remote_api_key",
         "rabbitmq_url",
         "redis_url",
         mode="before",
@@ -242,6 +267,40 @@ class Settings(BaseSettings):
                 f"{self.backend!r}."
             )
         return self
+
+    @model_validator(mode="after")
+    def fallback_requirements(self) -> "Settings":
+        if self.fallback_backend is None:
+            return self
+        if self.fallback_model_name is None:
+            raise ValueError(
+                "VORTEX_FALLBACK_MODEL_NAME must be set when "
+                "VORTEX_FALLBACK_BACKEND is set."
+            )
+        # Built here so a fallback missing its own requirements (a base URL,
+        # an API key) fails at startup like the primary would, not on the
+        # first request that needs it.
+        self.fallback_settings()
+        return self
+
+    def fallback_settings(self) -> "Settings | None":
+        """The settings the fallback backend is built from, or None."""
+        if self.fallback_backend is None:
+            return None
+        values = self.model_dump()
+        values.update(
+            backend=self.fallback_backend,
+            model_name=self.fallback_model_name,
+            fallback_backend=None,
+            fallback_model_name=None,
+        )
+        if self.fallback_remote_base_url is not None:
+            values["remote_base_url"] = self.fallback_remote_base_url
+        if self.fallback_remote_api_key is not None:
+            values["remote_api_key"] = self.fallback_remote_api_key
+        # model_validate rather than the constructor: the values are complete,
+        # and the constructor would read the environment again.
+        return Settings.model_validate(values)
 
     @field_validator("rabbitmq_url")
     @classmethod

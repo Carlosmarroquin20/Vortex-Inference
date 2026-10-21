@@ -254,6 +254,25 @@ spec:
           model file at the PVC mount path. Check pod logs:
           kubectl logs {{ $labels.pod }} -n vortex-inference --previous
 
+    # The fallback backend has been taking requests because the primary kept
+    # failing and the circuit breaker is skipping it. Clients are still
+    # answered, but by another model, possibly a paid provider; the primary
+    # needs attention before that becomes the steady state.
+    - alert: VortexPrimaryBackendBypassed
+      expr: |
+        sum(rate(vortex_backend_fallbacks_total{reason="circuit_open"}[5m])) > 0
+      for: 10m
+      labels:
+        severity: warning
+        team: mlops
+      annotations:
+        runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexprimarybackendbypassed"
+        summary: "The primary backend is being bypassed for the fallback"
+        description: >
+          For 10m, requests have gone straight to the fallback backend because
+          the primary failed repeatedly. Check vortex_backend_fallbacks_total
+          by reason and the primary's errors in the logs.
+
   # ---------------------------------------------------------------------------
   # Asynchronous Jobs
   # ---------------------------------------------------------------------------

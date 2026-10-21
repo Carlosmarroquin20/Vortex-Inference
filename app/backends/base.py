@@ -10,7 +10,7 @@ create_backend(), with the request path and its tests unchanged.
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypedDict, runtime_checkable
+from typing import Literal, NotRequired, Protocol, TypedDict, runtime_checkable
 
 
 class ChatMessage(TypedDict):
@@ -31,6 +31,9 @@ class GenerationResult(TypedDict):
     finish_reason: str | None
     tokens_prompt: int
     tokens_completion: int
+    # The model that produced the text, when it is not the configured one
+    # (a fallback backend served the request).
+    model: NotRequired[str]
 
 
 @dataclass(frozen=True, slots=True)

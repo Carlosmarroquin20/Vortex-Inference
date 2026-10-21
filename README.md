@@ -352,6 +352,36 @@ sketched in `k8s/overlays/remote/networkpolicy-egress.yaml`.
 `remote` leaves the model's PersistentVolume and claim in place, unused; delete
 them with `kubectl delete -f k8s/base/model-pv.yaml` if they are no longer needed.
 
+### Fallback backend
+
+A second backend can take the requests the primary cannot serve
+(`app/backends/fallback.py`): the primary is overloaded or rate limited
+(503), fails or times out upstream (502, 504), or the prompt does not fit its
+context, as when a 4K-context local model meets a long document that a
+provider's larger window can take. Client errors still go back unchanged, and
+abandoned requests are not retried. After `VORTEX_FALLBACK_FAILURE_THRESHOLD`
+(3) consecutive failures the primary is skipped for
+`VORTEX_FALLBACK_COOLDOWN_SECONDS` (30), then tried again.
+
+```bash
+VORTEX_FALLBACK_BACKEND=anthropic
+VORTEX_FALLBACK_MODEL_NAME=claude-opus-5-5
+VORTEX_FALLBACK_REMOTE_API_KEY=...        # or VORTEX_FALLBACK_REMOTE_BASE_URL for openai_compatible
+```
+
+The fallback shares every other setting with the primary. A buffered response
+names the model that produced it in `model`; a stream can only fall back
+before its first token, and keeps the primary's name in its chunks.
+`vortex_backend_fallbacks_total{reason}` counts every request that moved.
+In the cluster, a remote fallback needs egress to its provider: the remote
+profile's policy, or a rule for a provider inside the cluster.
+
+Verified with two instances of this server, the second serving as the
+first's OpenAI-compatible fallback: a 738-token prompt sent to a primary
+with a 256-token context came back from the fallback, buffered and streamed;
+with the fallback stopped, the client got its 502 and short prompts kept
+working on the primary.
+
 ---
 
 ## Asynchronous Jobs
@@ -594,6 +624,7 @@ vortex-inference/
 │       ├── llamacpp.py       # Local GGUF inference via llama-cpp-python
 │       ├── openai_compatible.py # Remote inference over an OpenAI-compatible API
 │       ├── anthropic_api.py  # Claude models via the Anthropic SDK
+│       ├── fallback.py       # Primary + fallback backend with a circuit breaker
 │       └── upstream.py       # Status mapping shared by the remote backends
 ├── tests/                    # pytest suite against an in-process llama_cpp fake; integration/ needs RabbitMQ and Redis
 ├── docs/

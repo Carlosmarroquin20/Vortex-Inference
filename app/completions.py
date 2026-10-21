@@ -154,7 +154,7 @@ def completion_response(
     return CompletionResponse(
         id=completion_id,
         created=int(time.time()),
-        model=model,
+        model=done.result.get("model", model),
         choices=[
             CompletionChoice(
                 index=0,
@@ -173,7 +173,7 @@ def chat_completion_response(
     return ChatCompletionResponse(
         id=completion_id,
         created=int(time.time()),
-        model=model,
+        model=done.result.get("model", model),
         choices=[
             ChatCompletionChoice(
                 index=0,

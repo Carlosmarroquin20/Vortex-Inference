@@ -64,6 +64,38 @@ tests:
         alertname: VortexInferenceSlowTimeToFirstToken
         exp_alerts: []
 
+  # The circuit breaker keeps skipping the primary; prompt-length fallbacks
+  # alone are routine and do not alert.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_backend_fallbacks_total{reason="circuit_open"}'
+        values: "0+3x30"
+      - series: 'vortex_backend_fallbacks_total{reason="prompt_too_long"}'
+        values: "0+3x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: VortexPrimaryBackendBypassed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: VortexPrimaryBackendBypassed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: mlops
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexprimarybackendbypassed"
+              summary: "The primary backend is being bypassed for the fallback"
+              description: "For 10m, requests have gone straight to the fallback backend because the primary failed repeatedly. Check vortex_backend_fallbacks_total by reason and the primary's errors in the logs.\n"
+
+  - interval: 1m
+    input_series:
+      - series: 'vortex_backend_fallbacks_total{reason="prompt_too_long"}'
+        values: "0+3x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: VortexPrimaryBackendBypassed
+        exp_alerts: []
+
   # --- Asynchronous jobs -----------------------------------------------------
 
   # One message reaches the dead-letter queue and stays there.

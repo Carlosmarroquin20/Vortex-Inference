@@ -101,6 +101,14 @@ MODEL_WARMUP_DURATION_SECONDS = Gauge(
     "file was already in the node's page cache.",
 )
 
+BACKEND_FALLBACKS_TOTAL = Counter(
+    "vortex_backend_fallbacks_total",
+    "Requests served by the fallback backend instead of the primary, by "
+    "reason: overloaded, upstream_error, timeout, prompt_too_long, or "
+    "circuit_open when the primary was skipped after repeated failures.",
+    ["reason"],
+)
+
 JOBS_SUBMITTED_TOTAL = Counter(
     "vortex_jobs_submitted_total",
     "Asynchronous jobs accepted and confirmed by RabbitMQ, by endpoint. "
