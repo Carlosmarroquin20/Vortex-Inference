@@ -51,7 +51,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build api-key show-api-key provider-key require-provider-key grafana-password dashboard deploy undeploy status logs metrics test load-test tunnel clean
+.PHONY: help setup model build api-key show-api-key provider-key require-provider-key grafana-password dashboard deploy undeploy status logs metrics test load-test loadgen tunnel clean
 
 # =============================================================================
 # Default target — always show help first
@@ -80,6 +80,7 @@ help:
 	@printf "  $(GREEN)Testing$(NC)\n"
 	@printf "    make test        Send a single inference request to verify the stack\n"
 	@printf "    make load-test   Run concurrent requests to trigger KEDA scale-out\n"
+	@printf "    make loadgen     Measure client-side latency (TTFT, TPOT); see LOADGEN_ARGS\n"
 	@echo ""
 	@printf "  $(GREEN)Teardown$(NC)\n"
 	@printf "    make undeploy    Remove inference workload (keeps monitoring stack)\n"
@@ -285,3 +286,19 @@ test:
 load-test:
 	@printf "$(GREEN)[load-test]$(NC) Starting load test to trigger KEDA scale-out...\n"
 	@bash scripts/load-test.sh
+
+# Client-side latency (end to end, time to first token, time per output token)
+# through the LoadBalancer. Options pass through scripts/loadgen.py, e.g.
+#   make loadgen LOADGEN_ARGS="--endpoint chat --stream --concurrency 8 --json run.json"
+# The API key reaches the script through its environment, not its arguments.
+LOADGEN_ARGS ?= --endpoint chat --stream --concurrency 4 --requests 20
+loadgen:
+	@INFERENCE_IP=$$(kubectl get svc vortex-inference-lb -n $(NAMESPACE) \
+		-o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null); \
+	if [ -z "$$INFERENCE_IP" ]; then \
+		printf "$(RED)[loadgen]$(NC) LoadBalancer IP not assigned. Is 'make tunnel' running?\n"; \
+		exit 1; \
+	fi; \
+	VORTEX_API_KEY=$$(kubectl get secret $(API_KEY_SECRET) -n $(NAMESPACE) \
+		-o jsonpath='{.data.api-key}' | base64 -d) \
+		python3 scripts/loadgen.py --url "http://$$INFERENCE_IP" $(LOADGEN_ARGS)

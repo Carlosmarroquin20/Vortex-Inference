@@ -330,6 +330,34 @@ them with `kubectl delete -f k8s/base/model-pv.yaml` if they are no longer neede
 
 ---
 
+## Load Testing
+
+`scripts/loadgen.py` measures latency from the client side: end to end, and for
+streamed requests time to first token and time per output token as chunks
+arrive. It needs only the Python standard library and can write a JSON report
+to compare runs.
+
+```bash
+make loadgen                                   # through the LoadBalancer (make tunnel)
+make loadgen LOADGEN_ARGS="--endpoint chat --stream --concurrency 8 --requests 40 --json run.json"
+VORTEX_API_KEY=... python3 scripts/loadgen.py --url http://127.0.0.1:8080 --stream
+```
+
+Workers run a closed loop (each sends its next request when the previous one
+ends), so results describe latency at a given concurrency. A measured example,
+Qwen2.5-0.5B-Instruct Q2_K on llama.cpp with 2 CPUs, streamed chat, 48 tokens:
+
+| Concurrency | TTFT p50 | TPOT p50 | Output tokens/s |
+|---|---|---|---|
+| 1 | 3.1 s | 30 ms | 6.2 |
+| 4 | 16.7 s | 31 ms | 10.4 |
+
+Decode speed holds under load while time to first token absorbs the queue: one
+permit per pod serializes requests, which is the cue for KEDA to add replicas.
+The first request after startup took 28 s at concurrency 1, paying the page
+faults of the memory-mapped weights. `scripts/load-test.sh` remains the
+KEDA scale-out demonstration.
+
 ## Observability
 
 ```bash
@@ -428,7 +456,9 @@ vortex-inference/
 │       └── remote/           # Remote-backend profile: patches over base/
 ├── scripts/
 │   ├── setup-minikube.sh     # Cluster bootstrap: Minikube + KEDA + kube-prometheus-stack
-│   └── download-model.sh     # Pinned-revision GGUF download, SHA-256 verified, resumable
+│   ├── download-model.sh     # Pinned-revision GGUF download, SHA-256 verified, resumable
+│   ├── load-test.sh          # KEDA scale-out demonstration
+│   └── loadgen.py            # Client-side latency measurement (TTFT, TPOT, JSON reports)
 ├── requirements.txt          # Runtime dependencies (baked into the image)
 ├── requirements-dev.txt      # Test and lint tooling
 ├── pyproject.toml            # ruff, pytest and coverage configuration
