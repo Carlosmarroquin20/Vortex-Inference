@@ -1,0 +1,66 @@
+# Worker changes for remote backends, mirroring deployment.yaml in this
+# overlay: no model volume, the provider key, and resources for a process
+# that waits on the network instead of running a model.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vortex-worker
+  namespace: vortex-inference
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        env:
+        - name: VORTEX_REMOTE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-provider-key
+              key: api-key
+              optional: false
+        # llama.cpp thread caps, meaningless without a local model.
+        - name: VORTEX_N_THREADS
+          $patch: delete
+        - name: OMP_NUM_THREADS
+          $patch: delete
+        - name: OPENBLAS_NUM_THREADS
+          $patch: delete
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "1"
+        startupProbe:
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          failureThreshold: 60  # 120s
+        volumeMounts:
+        - mountPath: /models
+          $patch: delete
+      volumes:
+      - name: model-storage
+        $patch: delete
+
+---
+# Each worker runs VORTEX_MAX_CONCURRENT_REQUESTS (16) jobs at once, so one
+# replica per 16 queued jobs; without a model in memory, more fit the node.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vortex-worker-scaler
+  namespace: vortex-inference
+spec:
+  maxReplicaCount: 4
+  triggers:
+  - type: rabbitmq
+    authenticationRef:
+      name: vortex-rabbitmq
+    metadata:
+      protocol: http
+      vhostName: "/"
+      queueName: vortex.jobs
+      mode: QueueLength
+      value: "16"
+      activationValue: "0"

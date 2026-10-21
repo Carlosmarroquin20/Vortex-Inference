@@ -25,12 +25,13 @@ metadata:
 # ResourceQuota caps aggregate resource consumption for the namespace.
 #
 # Sizing: the quota must admit KEDA's maxReplicaCount (3) plus the single
-# rolling-update surge pod (maxSurge=1), i.e. 4 inference pods at once.
-# Per pod: requests 2 CPU / 2Gi, limits 3.5 CPU / 4Gi.
-#   requests.cpu    4 × 2    = 8
-#   requests.memory 4 × 2Gi  = 8Gi
-#   limits.cpu      4 × 3.5  = 14
-#   limits.memory   4 × 4Gi  = 16Gi
+# rolling-update surge pod (maxSurge=1), i.e. 4 inference pods at once,
+# next to the job worker (one, replaced with Recreate), RabbitMQ and Redis.
+#                   4 inference     worker   RabbitMQ  Redis    total
+#   requests.cpu    4 × 2           1        0.25      0.1      9.35
+#   requests.memory 4 × 2Gi         1.5Gi    512Mi     128Mi    10.1Gi
+#   limits.cpu      4 × 3.5         2        1         0.5      17.5
+#   limits.memory   4 × 4Gi         4Gi      1Gi       256Mi    21.25Gi
 # A tighter quota fails silently from KEDA's point of view: the HPA raises
 # spec.replicas, the ReplicaSet controller gets "exceeded quota", and no
 # pod is ever created. Actual placement is still bounded by node capacity;
@@ -42,11 +43,11 @@ metadata:
   namespace: vortex-inference
 spec:
   hard:
-    requests.memory: "8Gi"
-    limits.memory: "16Gi"
-    requests.cpu: "8"
-    limits.cpu: "14"
-    pods: "6"  # 4 inference pods at peak rollout, plus room for debug pods
+    requests.memory: "11Gi"
+    limits.memory: "22Gi"
+    requests.cpu: "10"
+    limits.cpu: "18"
+    pods: "9"  # 7 at peak rollout, plus room for debug pods
 
 ---
 # LimitRange sets defaults for any pod spec that omits resource fields.

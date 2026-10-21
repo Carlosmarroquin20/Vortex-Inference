@@ -40,6 +40,8 @@ A production-grade MLOps platform for serving specialized Small Language Models 
 
 **Data flow:** Client → LoadBalancer Service → FastAPI pod → llama-cpp-python (GGUF, CPU) → response. In parallel: Prometheus scrapes `/metrics` every 15s. KEDA queries Prometheus every 15s and adjusts `spec.replicas` on the Deployment based on `sum(vortex_inference_active_requests)`.
 
+**Asynchronous jobs:** Client → `POST /v1/jobs` → API writes the job to Redis and publishes it to RabbitMQ → 202. KEDA reads the queue length from RabbitMQ's management API and scales the `vortex-worker` Deployment from zero; a worker runs the job on the same backend and stores the result in Redis, where `GET /v1/jobs/{id}` reads it. See [Asynchronous Jobs](#asynchronous-jobs).
+
 ---
 
 ## Stack
@@ -407,6 +409,33 @@ as the API, so it loads the same backend, and takes up to
   `vortex_worker_jobs_in_progress`. Its log lines carry the job ID in
   `request_id`.
 
+### In the cluster
+
+`make deploy` runs the whole pipeline in the `vortex-inference` namespace:
+RabbitMQ and Redis as single-replica StatefulSets (`k8s/base/rabbitmq.yaml`,
+`k8s/base/redis.yaml`, the same pinned images the integration tests use), and
+the workers (`k8s/base/worker.yaml`). `make jobs-secrets`, which `deploy`
+runs first, generates their credentials once into the `vortex-inference-jobs`
+Secret.
+
+- **Scale to zero.** KEDA's RabbitMQ scaler adds one worker per
+  `VORTEX_MAX_CONCURRENT_REQUESTS` messages in `vortex.jobs` and removes the
+  last one after 5 idle minutes. It counts unacknowledged messages too (the
+  management API rather than AMQP), so a worker busy with the last job is not
+  scaled away. Measured on minikube: a job queued on an idle cluster had a
+  worker 12s later and its result 63s after submission, model load included.
+- **Batch yields to interactive.** Workers run under the `vortex-batch`
+  PriorityClass, below everything else, so on a full node the scheduler
+  preempts a worker for an API replica; the worker drains on SIGTERM and its
+  job is redelivered.
+- **Network.** RabbitMQ and Redis accept connections only from the API and the
+  workers, the management API only from KEDA, and the metrics ports only from
+  the monitoring namespace (`k8s/base/networkpolicy-jobs.yaml`). Neither has
+  any egress.
+- **Persistence.** RabbitMQ keeps its queues and Redis its append-only file on
+  PersistentVolumeClaims; Redis refuses writes rather than evicting job
+  records when it reaches `maxmemory`.
+
 ## Load Testing
 
 `scripts/loadgen.py` measures latency from the client side: end to end, and for
@@ -522,16 +551,20 @@ vortex-inference/
 │   │   ├── kustomization.yaml
 │   │   ├── namespace.yaml    # Namespace + ResourceQuota + LimitRange
 │   │   ├── networkpolicy.yaml # Default deny; HTTP ingress, no egress
+│   │   ├── networkpolicy-jobs.yaml # RabbitMQ, Redis and worker traffic
 │   │   ├── configmap.yaml    # Runtime configuration (non-sensitive)
 │   │   ├── model-pv.yaml     # PersistentVolume + PVC for GGUF model storage
 │   │   ├── deployment.yaml   # Deployment with probes, anti-affinity, resource limits
 │   │   ├── service.yaml      # ClusterIP + LoadBalancer services
 │   │   ├── pdb.yaml          # PodDisruptionBudget
 │   │   ├── keda-autoscaler.yaml # ScaledObject with Prometheus trigger
+│   │   ├── rabbitmq.yaml     # Job broker: StatefulSet + Service
+│   │   ├── redis.yaml        # Job store: StatefulSet + Service + config
+│   │   ├── worker.yaml       # Job workers, KEDA RabbitMQ scaler, PriorityClass
 │   │   └── monitoring/
 │   │       ├── grafana-dashboard.json # Dashboard, provisioned via the Grafana sidecar
 │   │       ├── prometheus-rules.yaml  # PrometheusRule CRD — SLO alerts + recording rules
-│   │       └── servicemonitor.yaml    # ServiceMonitor CRD — Prometheus scrape config
+│   │       └── servicemonitor.yaml    # ServiceMonitor/PodMonitor CRDs — scrape config
 │   └── overlays/
 │       └── remote/           # Remote-backend profile: patches over base/
 ├── scripts/

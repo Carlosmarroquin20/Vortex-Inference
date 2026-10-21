@@ -21,6 +21,7 @@ IMAGE_NAME       := vortex-inference
 IMAGE_TAG        := 1.0.0
 API_KEY_SECRET   := vortex-inference-api-key
 PROVIDER_KEY_SECRET := vortex-inference-provider-key
+JOBS_SECRET      := vortex-inference-jobs
 MONITORING_NAMESPACE := monitoring
 
 # Deployment profile, a Kustomize directory under k8s/:
@@ -51,7 +52,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build api-key show-api-key provider-key require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen tunnel clean
+.PHONY: help setup model build api-key show-api-key provider-key jobs-secrets require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen tunnel clean
 
 # =============================================================================
 # Default target — always show help first
@@ -68,6 +69,7 @@ help:
 	@printf "    make build       Build the image and load it into minikube\n"
 	@printf "    make api-key     Create the API key Secret if it does not exist\n"
 	@printf "    make provider-key  Store the model provider's API key (remote profile)\n"
+	@printf "    make jobs-secrets  Create the RabbitMQ and Redis credentials if missing\n"
 	@printf "    make dashboard   Provision the Grafana dashboard via the sidecar\n"
 	@printf "    make deploy      Apply the manifests (PROFILE=local|remote, default local)\n"
 	@echo ""
@@ -164,6 +166,25 @@ provider-key:
 		"$(PROVIDER_KEY_SECRET)" "$(NAMESPACE)" "$$(printf '%s' "$$key" | base64 | tr -d '\n')" \
 		| kubectl "$$verb" -f -
 
+# Generates the RabbitMQ and Redis credentials, and the connection URLs built
+# from them, when the Secret is missing. Never rotated by a re-run: RabbitMQ
+# applies its password only on first boot, so a new one here would lock the
+# API and the workers out of a broker that still has the old one. The
+# manifest goes to kubectl on stdin, keeping the passwords out of the process
+# list; create rather than apply keeps them out of annotations.
+jobs-secrets:
+	@kubectl apply -f k8s/base/namespace.yaml
+	@if kubectl get secret $(JOBS_SECRET) -n $(NAMESPACE) >/dev/null 2>&1; then \
+		printf "$(GREEN)[jobs-secrets]$(NC) Secret $(JOBS_SECRET) already exists. Keeping current credentials.\n"; \
+	else \
+		rabbit=$$(python3 -c 'import secrets; print(secrets.token_hex(24))'); \
+		redis=$$(python3 -c 'import secrets; print(secrets.token_hex(24))'); \
+		printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: %s\n  namespace: %s\ntype: Opaque\nstringData:\n  rabbitmq-username: "vortex"\n  rabbitmq-password: "%s"\n  rabbitmq-url: "amqp://vortex:%s@vortex-rabbitmq:5672/"\n  rabbitmq-management-url: "http://vortex:%s@vortex-rabbitmq.%s.svc:15672"\n  redis-password: "%s"\n  redis-url: "redis://:%s@vortex-redis:6379/0"\n  redis-auth.conf: "requirepass %s"\n' \
+			"$(JOBS_SECRET)" "$(NAMESPACE)" "$$rabbit" "$$rabbit" "$$rabbit" "$(NAMESPACE)" "$$redis" "$$redis" "$$redis" \
+			| kubectl create -f -; \
+		printf "$(GREEN)[jobs-secrets]$(NC) Secret $(JOBS_SECRET) created.\n"; \
+	fi
+
 require-provider-key:
 	@kubectl get secret $(PROVIDER_KEY_SECRET) -n $(NAMESPACE) >/dev/null 2>&1 || { \
 		printf "$(RED)[deploy]$(NC) Secret $(PROVIDER_KEY_SECRET) not found. Run: make provider-key\n"; \
@@ -197,7 +218,7 @@ dashboard:
 # local profile removes the remote profile's egress policy explicitly; left
 # behind, it would keep egress open for pods that should have none. It is
 # removed before the apply so the local pods never start with it in place.
-deploy: $(if $(filter remote,$(PROFILE)),require-provider-key) api-key dashboard
+deploy: $(if $(filter remote,$(PROFILE)),require-provider-key) api-key jobs-secrets dashboard
 	@printf "$(GREEN)[deploy]$(NC) Applying profile $(PROFILE) ($(KUSTOMIZE_DIR)) to namespace $(NAMESPACE)...\n"
 ifeq ($(PROFILE),local)
 	@kubectl delete networkpolicy vortex-inference-allow-provider-egress \
@@ -205,16 +226,20 @@ ifeq ($(PROFILE),local)
 endif
 	@kubectl apply -k $(KUSTOMIZE_DIR)
 	@printf "$(GREEN)[deploy]$(NC) Waiting for rollout (a local model load may take up to 90s)...\n"
+	@kubectl rollout status statefulset/vortex-rabbitmq -n $(NAMESPACE) --timeout=300s
+	@kubectl rollout status statefulset/vortex-redis -n $(NAMESPACE) --timeout=120s
 	@kubectl rollout status deployment/$(IMAGE_NAME) -n $(NAMESPACE) --timeout=300s
-	@printf "$(GREEN)[deploy]$(NC) Deployment ready.\n"
+	@printf "$(GREEN)[deploy]$(NC) Deployment ready. Job workers start when jobs are queued.\n"
 	@$(MAKE) status
 
 undeploy:
 	# Removes the inference workload but preserves the monitoring stack (Prometheus,
 	# Grafana, KEDA). This allows re-deploying with a new image without losing
-	# historical metrics or dashboard state.
+	# historical metrics or dashboard state. RabbitMQ and Redis stay too, with
+	# the jobs still queued and the results not yet collected.
 	@printf "$(YELLOW)[undeploy]$(NC) Removing inference workload from $(NAMESPACE)...\n"
 	@kubectl delete -f k8s/base/keda-autoscaler.yaml --ignore-not-found
+	@kubectl delete -f k8s/base/worker.yaml --ignore-not-found
 	@kubectl delete -f k8s/base/pdb.yaml --ignore-not-found
 	@kubectl delete -f k8s/base/deployment.yaml --ignore-not-found
 	@kubectl delete -f k8s/base/service.yaml --ignore-not-found

@@ -68,6 +68,19 @@ data:
   # read timeout. 120s covers Phi-3-mini at 2048 max_tokens on 2 CPU threads.
   VORTEX_INFERENCE_TIMEOUT_SECONDS: "120.0"
 
+  # Asynchronous jobs (POST /v1/jobs), run by the vortex-worker Deployment.
+  # The RabbitMQ and Redis URLs carry credentials and come from the
+  # vortex-inference-jobs Secret (`make jobs-secrets`), not from here.
+  VORTEX_JOBS_ENABLED: "true"
+  # Also the queueName of the worker's ScaledObject (worker.yaml).
+  VORTEX_JOBS_QUEUE: "vortex.jobs"
+  VORTEX_JOB_TTL_SECONDS: "86400"
+  # Fixed in the queue's arguments when RabbitMQ first creates it; changing
+  # it later means deleting the queue (see docs/runbooks.md).
+  VORTEX_JOB_MAX_ATTEMPTS: "3"
+  VORTEX_JOB_RETRY_DELAY_SECONDS: "10"
+  VORTEX_WORKER_METRICS_PORT: "9090"
+
   # Interactive API docs and the OpenAPI schema are not exposed in the
   # cluster. Set explicitly so the effective value is visible in review
   # rather than relying on the application default.

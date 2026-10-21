@@ -1,0 +1,167 @@
+---
+# RabbitMQ for the asynchronous jobs: a single broker node holding the jobs,
+# retry and dead-letter queues that app/jobs/queue.py declares.
+#
+# One node is enough for a single-node cluster, and quorum queues already
+# run on it (as a one-member Raft group); they only replicate once more
+# nodes join. A production deployment would run three replicas through the
+# RabbitMQ Cluster Operator, which handles peer discovery, the Erlang cookie
+# and rolling upgrades that a hand-written StatefulSet would have to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vortex-rabbitmq
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-rabbitmq
+    app.kubernetes.io/component: message-broker
+    app.kubernetes.io/part-of: vortex-inference
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vortex-rabbitmq
+  ports:
+  - name: amqp
+    port: 5672
+    targetPort: amqp
+    protocol: TCP
+  # Management API, read by KEDA's RabbitMQ scaler for the queue length.
+  - name: management
+    port: 15672
+    targetPort: management
+    protocol: TCP
+  - name: prometheus
+    port: 15692
+    targetPort: prometheus
+    protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vortex-rabbitmq
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-rabbitmq
+    app.kubernetes.io/component: message-broker
+    app.kubernetes.io/part-of: vortex-inference
+spec:
+  replicas: 1
+  serviceName: vortex-rabbitmq
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-rabbitmq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vortex-rabbitmq
+        app.kubernetes.io/component: message-broker
+        app.kubernetes.io/part-of: vortex-inference
+    spec:
+      # The broker's node name is rabbit@<hostname>, and its data directory
+      # is keyed by it; the StatefulSet's stable pod name (vortex-rabbitmq-0)
+      # keeps both the same across restarts.
+      automountServiceAccountToken: false
+      # Long enough for the broker to close connections and flush queue
+      # state to disk; a hard kill only costs a slower, recovering boot.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        # The image's rabbitmq user. Running as it from the start, rather
+        # than letting the entrypoint drop privileges, satisfies the
+        # namespace's restricted Pod Security Standard.
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: rabbitmq
+        # Same image and digest as tests/integration/compose.yaml, so the
+        # integration tests run against the broker deployed here.
+        image: rabbitmq:4.4.0-management-alpine@sha256:d5c8b200a061242868833c8bbdd0703534a4a06ffe654a853e33acd46c7ce258
+        ports:
+        - name: amqp
+          containerPort: 5672
+          protocol: TCP
+        - name: management
+          containerPort: 15672
+          protocol: TCP
+        # rabbitmq_prometheus is enabled in the official image.
+        - name: prometheus
+          containerPort: 15692
+          protocol: TCP
+        # Applied only when the data directory is empty, i.e. on the first
+        # boot. Rotating the password later is done in the broker
+        # (rabbitmqctl change_password) and then in the Secret; see
+        # docs/runbooks.md.
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: rabbitmq-username
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: rabbitmq-password
+        # RabbitMQ reads the cgroup memory limit and raises a memory alarm
+        # at 60% of it (blocking publishers, which the API reports as 503)
+        # rather than letting the kernel OOM-kill the broker.
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        # rabbitmq-diagnostics starts a short-lived Erlang node, which takes
+        # a second or two, hence the generous timeouts.
+        startupProbe:
+          exec:
+            command: ["rabbitmq-diagnostics", "-q", "ping"]
+          periodSeconds: 5
+          failureThreshold: 36  # 180s: a recovering boot replays queue logs
+          timeoutSeconds: 15
+        # Ready once the AMQP listener accepts connections, not merely when
+        # the Erlang node is up.
+        readinessProbe:
+          exec:
+            command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+          periodSeconds: 15
+          failureThreshold: 3
+          timeoutSeconds: 15
+        livenessProbe:
+          exec:
+            command: ["rabbitmq-diagnostics", "-q", "ping"]
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 20
+        volumeMounts:
+        # Messages, queue logs, the Erlang cookie and the node's identity.
+        - name: data
+          mountPath: /var/lib/rabbitmq
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: "64Mi"
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app.kubernetes.io/name: vortex-rabbitmq
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      # The cluster's default StorageClass; on minikube, its hostpath
+      # provisioner.
+      resources:
+        requests:
+          storage: 1Gi

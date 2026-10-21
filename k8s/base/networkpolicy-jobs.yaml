@@ -1,0 +1,156 @@
+---
+# Network access for the asynchronous jobs, on top of the default deny in
+# networkpolicy.yaml. Each rule names both ends: who may connect, and on
+# which port.
+#
+#   API, workers  -> RabbitMQ 5672 (AMQP), Redis 6379, cluster DNS
+#   KEDA operator -> RabbitMQ 15672 (management API, for the queue length)
+#   Prometheus    -> RabbitMQ 15692, workers 9090 (metrics)
+#
+# RabbitMQ and Redis themselves get no egress at all.
+
+# API and workers: DNS to resolve the two Services, and the two ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vortex-jobs-clients-egress
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/part-of: vortex-inference
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values: [vortex-inference, vortex-worker]
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: vortex-rabbitmq
+    ports:
+    - port: 5672
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: vortex-redis
+    ports:
+    - port: 6379
+      protocol: TCP
+
+---
+# Workers serve no traffic; their only port is for Prometheus. The kubelet's
+# probes come from the node and are always allowed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vortex-worker-ingress
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-worker
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-worker
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - port: metrics
+      protocol: TCP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vortex-rabbitmq
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-rabbitmq
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-rabbitmq
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: [vortex-inference, vortex-worker]
+    ports:
+    - port: amqp
+      protocol: TCP
+  # The management API also takes writes; only the KEDA operator, which
+  # polls the queue length, reaches it.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: keda
+    ports:
+    - port: management
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - port: prometheus
+      protocol: TCP
+  # A single node talks to no peers. Its own Erlang distribution traffic
+  # (rabbitmq-diagnostics in the probes) stays on the loopback interface,
+  # which NetworkPolicy does not filter.
+  egress: []
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vortex-redis
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-redis
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-redis
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: [vortex-inference, vortex-worker]
+    ports:
+    - port: redis
+      protocol: TCP
+  egress: []

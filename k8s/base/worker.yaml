@@ -1,0 +1,215 @@
+---
+# Job workers (python -m app.worker): consume the jobs queue and run each job
+# on the same backend and model as the API. Scaled by KEDA on the queue's
+# length, from zero when there is nothing to do.
+#
+# Batch work yields to interactive traffic. Workers run at a priority below
+# every other pod, so when the API scales out on a full node the scheduler
+# preempts a worker to make room; the worker drains on SIGTERM and its
+# unfinished job is redelivered later. preemptionPolicy: Never keeps workers
+# from ever displacing anything themselves.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: vortex-batch
+  labels:
+    app.kubernetes.io/part-of: vortex-inference
+# Below the default of 0 that the API and the monitoring stack run at.
+value: -100
+preemptionPolicy: Never
+globalDefault: false
+description: Asynchronous inference jobs; preempted first when interactive pods need room.
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vortex-worker
+  namespace: vortex-inference
+  labels:
+    # Not app.kubernetes.io/name: vortex-inference: the API's Services select
+    # on that label and would route HTTP requests to the workers.
+    app.kubernetes.io/name: vortex-worker
+    app.kubernetes.io/component: job-worker
+    app.kubernetes.io/part-of: vortex-inference
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  # replicas is left out on purpose: KEDA owns it, and a value here would be
+  # re-applied by every `kubectl apply`, scaling a busy worker set back down.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-worker
+  # Recreate: the old worker drains before the new one loads the model, so
+  # an update never holds two model copies in memory. Jobs wait in the
+  # queue meanwhile, which is what the queue is for.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vortex-worker
+        app.kubernetes.io/component: job-worker
+        app.kubernetes.io/part-of: vortex-inference
+    spec:
+      priorityClassName: vortex-batch
+      # Covers the drain on SIGTERM: inference_timeout_seconds (120) for the
+      # job in progress plus the worker's 15s to store its result, with
+      # margin. Kept in step with VORTEX_INFERENCE_TIMEOUT_SECONDS.
+      terminationGracePeriodSeconds: 150
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: vortex-inference:1.0.0
+        imagePullPolicy: Never
+        command: ["python", "-m", "app.worker"]
+        ports:
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: vortex-inference-config
+        env:
+        - name: VORTEX_RABBITMQ_URL
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: rabbitmq-url
+        - name: VORTEX_REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: redis-url
+        # One inference thread, to match the 1 CPU request below; see the
+        # thread-pool notes in configmap.yaml. A worker at full speed would
+        # need the API's 2 CPUs, which on this node only fit by keeping the
+        # API one replica short of its maximum.
+        - name: VORTEX_N_THREADS
+          value: "1"
+        - name: OMP_NUM_THREADS
+          value: "1"
+        - name: OPENBLAS_NUM_THREADS
+          value: "1"
+        # The model's mapped weights dominate memory, as for the API; the
+        # request is lower because the scheduler only has to fit one worker
+        # next to the API's replicas, and the limit matches the API's.
+        resources:
+          requests:
+            memory: "1536Mi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop: ["ALL"]
+        # Started once the model is loaded and the worker consumes; the
+        # budget matches the API's model load allowance. Liveness begins
+        # only after that.
+        startupProbe:
+          httpGet:
+            path: /health/ready
+            port: metrics
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30  # 300s
+          timeoutSeconds: 5
+        # A stalled event loop or a wedged inference thread (app/jobs/health.py).
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: metrics
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 10
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: vortex-model-pvc
+          readOnly: true
+      - name: tmp
+        emptyDir:
+          sizeLimit: "100Mi"
+
+---
+# Credentials for KEDA's RabbitMQ scaler: the management API URL, with the
+# broker user's password, from the Secret `make jobs-secrets` creates.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: vortex-rabbitmq
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-worker
+    app.kubernetes.io/component: autoscaler
+spec:
+  secretTargetRef:
+  - parameter: host
+    name: vortex-inference-jobs
+    key: rabbitmq-management-url
+
+---
+# Scales the workers on the jobs queue: one replica per
+# VORTEX_MAX_CONCURRENT_REQUESTS messages, down to zero when it is empty.
+#
+# Scale to zero suits jobs where it does not suit the API: nobody is waiting
+# on a connection, so the 60-90s model load on the first job after an idle
+# period is an acceptable start-up delay, and an idle worker would otherwise
+# hold a model's worth of memory for nothing.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vortex-worker-scaler
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-worker
+    app.kubernetes.io/component: autoscaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vortex-worker
+  minReplicaCount: 0
+  # One on this node: with the API at its three replicas, a second worker
+  # would not fit (see the quota in namespace.yaml).
+  maxReplicaCount: 1
+  pollingInterval: 15
+  # Idle time before scaling to zero. Long enough that a steady trickle of
+  # jobs does not pay the model load on each one.
+  cooldownPeriod: 300
+  triggers:
+  - type: rabbitmq
+    authenticationRef:
+      name: vortex-rabbitmq
+    metadata:
+      # The management API rather than AMQP: over AMQP the scaler sees only
+      # messages ready for delivery, so a worker busy with the last job
+      # would look idle and be scaled to zero mid-job. The management API
+      # counts unacknowledged messages too.
+      protocol: http
+      vhostName: "/"
+      # Must match VORTEX_JOBS_QUEUE. Retry queues are not counted: their
+      # messages come back to this queue when their delay ends, and the
+      # workers scale up then.
+      queueName: vortex.jobs
+      mode: QueueLength
+      # Messages per replica: VORTEX_MAX_CONCURRENT_REQUESTS, the jobs one
+      # worker runs at once.
+      value: "1"
+      activationValue: "0"

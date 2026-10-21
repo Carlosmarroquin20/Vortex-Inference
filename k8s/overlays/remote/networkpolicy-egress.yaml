@@ -32,9 +32,12 @@ metadata:
     app.kubernetes.io/name: vortex-inference
     app.kubernetes.io/component: network-policy
 spec:
+  # The API and the job workers both call the provider.
   podSelector:
-    matchLabels:
-      app.kubernetes.io/name: vortex-inference
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values: [vortex-inference, vortex-worker]
   policyTypes:
   - Egress
   egress:

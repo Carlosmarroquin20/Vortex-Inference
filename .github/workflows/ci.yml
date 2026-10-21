@@ -291,7 +291,7 @@ jobs:
         # indentation and typo mistakes surface.
         run: |
           kubeconform -strict -summary -kubernetes-version 1.35.9 \
-            -skip ScaledObject,ServiceMonitor,PrometheusRule \
+            -skip ScaledObject,TriggerAuthentication,ServiceMonitor,PodMonitor,PrometheusRule \
             "${RUNNER_TEMP}/rendered/local.yaml" \
             "${RUNNER_TEMP}/rendered/remote.yaml"
 
@@ -299,15 +299,18 @@ jobs:
         # Resources using third-party API groups (keda.sh, monitoring.coreos.com)
         # have no published schema here. Each must still be a complete object
         # with the four required top-level fields, and each profile must
-        # contain all three, which catches a patch or resource list that
-        # dropped one.
+        # contain the expected number of each, which catches a patch or
+        # resource list that dropped one. Expected counts: the API and the
+        # job workers each have a ScaledObject.
         run: |
           for profile in local remote; do
             rendered="${RUNNER_TEMP}/rendered/${profile}.yaml"
-            for kind in ScaledObject ServiceMonitor PrometheusRule; do
+            for expected in ScaledObject=2 TriggerAuthentication=1 ServiceMonitor=1 PrometheusRule=1; do
+              kind="${expected%=*}"
+              want="${expected#*=}"
               count=$(yq eval-all "[select(.kind == \"${kind}\" and has(\"apiVersion\") and has(\"metadata\") and has(\"spec\"))] | length" "${rendered}")
-              if [ "${count}" != "1" ]; then
-                echo "Profile ${profile}: expected one complete ${kind}, found ${count}"
+              if [ "${count}" != "${want}" ]; then
+                echo "Profile ${profile}: expected ${want} complete ${kind}, found ${count}"
                 exit 1
               fi
             done

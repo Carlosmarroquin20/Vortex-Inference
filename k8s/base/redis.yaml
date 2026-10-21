@@ -1,0 +1,173 @@
+---
+# Redis for job records and idempotency keys (app/jobs/store.py).
+#
+# Every key the application writes carries a TTL, so memory use follows the
+# number of jobs submitted per job_ttl_seconds rather than growing without
+# bound. The configuration below makes Redis refuse writes when it is full
+# instead of evicting keys: an evicted job record would turn a finished job
+# into a 404 and let a worker drop its message, while a refused write is a
+# 503 the client retries.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vortex-redis-config
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-redis
+    app.kubernetes.io/component: job-store
+    app.kubernetes.io/part-of: vortex-inference
+data:
+  redis.conf: |
+    # Append-only file, fsynced every second: a broker restart loses at
+    # most a second of job updates, which the worker repeats because it
+    # acknowledges messages only after Redis has the outcome.
+    appendonly yes
+    appendfsync everysec
+    save ""
+    dir /data
+
+    # Below the container's 256Mi limit, leaving room for the AOF rewrite
+    # buffer and connection overhead.
+    maxmemory 192mb
+    maxmemory-policy noeviction
+
+    # requirepass, from the vortex-inference-jobs Secret, so the password
+    # appears neither in this ConfigMap nor in the process arguments.
+    include /etc/redis/auth/auth.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vortex-redis
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-redis
+    app.kubernetes.io/component: job-store
+    app.kubernetes.io/part-of: vortex-inference
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vortex-redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+    protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vortex-redis
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-redis
+    app.kubernetes.io/component: job-store
+    app.kubernetes.io/part-of: vortex-inference
+spec:
+  replicas: 1
+  serviceName: vortex-redis
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vortex-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vortex-redis
+        app.kubernetes.io/component: job-store
+        app.kubernetes.io/part-of: vortex-inference
+      annotations:
+        # Changing redis.conf does not restart the pod on its own; bump
+        # this value (or run `kubectl rollout restart`) when it changes.
+        vortex.io/config-revision: "1"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image's redis user, for the restricted Pod Security Standard.
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: redis
+        # Same image and digest as tests/integration/compose.yaml.
+        image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+        command: ["redis-server", "/etc/redis/redis.conf"]
+        ports:
+        - name: redis
+          containerPort: 6379
+          protocol: TCP
+        env:
+        # Read by redis-cli in the probes below, so the password is not on
+        # their command line either.
+        - name: REDISCLI_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: redis-password
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        # redis-cli exits 0 on an error reply too, so the probe looks for
+        # PONG: a NOAUTH or LOADING answer is not healthy.
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli ping | grep -q PONG"]
+          periodSeconds: 10
+          failureThreshold: 3
+          timeoutSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli ping | grep -q PONG"]
+          # Loading a large AOF answers LOADING until it is done; the delay
+          # keeps that from being mistaken for a hung server.
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 5
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: config
+          mountPath: /etc/redis/redis.conf
+          subPath: redis.conf
+          readOnly: true
+        - name: auth
+          mountPath: /etc/redis/auth
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: vortex-redis-config
+      - name: auth
+        secret:
+          secretName: vortex-inference-jobs
+          items:
+          - key: redis-auth.conf
+            path: auth.conf
+          # Owned by root with fsGroup as the group: 0440 lets the redis
+          # user read it through the group and nobody else.
+          defaultMode: 0440
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app.kubernetes.io/name: vortex-redis
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi

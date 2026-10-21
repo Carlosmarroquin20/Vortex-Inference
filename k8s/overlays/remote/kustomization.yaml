@@ -13,7 +13,9 @@
 #   - allows the one kind of egress the pods need: DNS, and HTTPS to public
 #     addresses (networkpolicy-egress.yaml);
 #   - retunes the KEDA threshold for many concurrent requests per pod
-#     (keda-autoscaler.yaml).
+#     (keda-autoscaler.yaml);
+#   - applies the same changes to the job workers, and scales them for 16
+#     jobs per replica (worker.yaml).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -26,3 +28,4 @@ patches:
 - path: deployment.yaml
 - path: model-storage.yaml
 - path: keda-autoscaler.yaml
+- path: worker.yaml

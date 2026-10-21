@@ -127,6 +127,18 @@ spec:
               name: vortex-inference-api-key
               key: api-key
               optional: false
+        # Job queue and store, for POST /v1/jobs. The API connects on first
+        # use, so the completion endpoints serve even while either is down.
+        - name: VORTEX_RABBITMQ_URL
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: rabbitmq-url
+        - name: VORTEX_REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: vortex-inference-jobs
+              key: redis-url
 
         # ---------------------------------------------------------------------------
         # Resource Management

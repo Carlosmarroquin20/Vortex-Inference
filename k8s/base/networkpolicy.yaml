@@ -28,7 +28,7 @@ spec:
   - Egress
 
 ---
-# Inference pods: ingress on the HTTP port only, no egress at all.
+# Inference pods: ingress on the HTTP port only, and no egress of their own.
 #
 # Ingress is not restricted by source. The completions API is published
 # through a LoadBalancer, and with externalTrafficPolicy=Cluster kube-proxy
@@ -37,12 +37,13 @@ spec:
 # bearer token; this policy closes every other port. Prometheus scrapes the
 # same port from the monitoring namespace and is covered by this rule.
 #
-# Egress is denied entirely: with the llama_cpp backend the server reads
-# weights from a local volume and calls nothing over the network, not even
-# DNS. A compromised process therefore cannot reach other services or
-# exfiltrate data. Anything that needs egress gets its own, narrowly scoped
-# policy; the remote profile adds one for DNS and HTTPS to the model provider
-# (k8s/overlays/remote/networkpolicy-egress.yaml).
+# Egress is denied here: with the llama_cpp backend the server reads
+# weights from a local volume and generates completions without calling
+# anything over the network. A compromised process therefore cannot reach
+# other services or exfiltrate data. Anything that needs egress gets its
+# own, narrowly scoped policy: the asynchronous jobs allow DNS, RabbitMQ and
+# Redis (networkpolicy-jobs.yaml), and the remote profile adds DNS and HTTPS
+# to the model provider (k8s/overlays/remote/networkpolicy-egress.yaml).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
