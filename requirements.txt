@@ -7,7 +7,7 @@ llama-cpp-python==0.3.36
 # HTTP framework
 # FastAPI is chosen over Flask for native async support — critical for serving
 # concurrent health checks and metrics scrapes without blocking the inference thread.
-fastapi==0.143.0
+fastapi==0.149.0
 uvicorn[standard]==0.54.0
 
 # Starlette is pinned explicitly even though FastAPI pulls it in transitively.
@@ -15,11 +15,11 @@ uvicorn[standard]==0.54.0
 # request-parsing CVEs in the image. Pinning it here makes the security-relevant
 # version visible in review and to dependency scanners instead of leaving it to
 # the resolver.
-starlette==1.8.0
+starlette==1.9.0
 
 # Configuration management via Pydantic v2
 pydantic==2.14.1
-pydantic-settings==2.15.0
+pydantic-settings==2.16.0
 
 # Prometheus instrumentation
 # prometheus-client is the reference implementation — no dependencies, stable API.
@@ -28,11 +28,11 @@ prometheus-client==0.26.0
 # HTTP client for remote inference backends (app/backends/openai_compatible.py).
 # httpx2 rather than httpx: it is the client Starlette 1.x and the OpenAI SDK
 # build on, so the image and the test suite share one HTTP stack.
-httpx2==2.13.1
+httpx2==2.14.0
 
 # Official SDK for the anthropic backend (app/backends/anthropic_api.py). The
 # 1.x line runs on httpx2, so it shares the client pinned above.
-anthropic==1.13.0
+anthropic==1.15.0
 
 # Asynchronous jobs (app/jobs): RabbitMQ client with publisher confirms and
 # automatic reconnection, and the Redis client for job state.
