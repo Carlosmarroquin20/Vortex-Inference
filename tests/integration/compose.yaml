@@ -24,7 +24,7 @@ services:
       retries: 24
 
   redis:
-    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    image: redis:8.10.2-alpine@sha256:9f8d2d789b9a1d1e3f283f979aa9cbf393373806472e1ccd460e2f9c869b833b
     # No persistence: every run starts empty.
     command: ["redis-server", "--requirepass", "integration-only", "--save", "", "--appendonly", "no"]
     ports:
