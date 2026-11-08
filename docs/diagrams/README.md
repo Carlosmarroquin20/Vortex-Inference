@@ -12,8 +12,11 @@ diagram reviewable in pull requests and stops it drifting into a stale screensho
 | [`vortex-architecture.json`](vortex-architecture.json) | Runtime topology: synchronous inference, asynchronous jobs, autoscaling and observability, with guided views for each |
 
 The top-level [`README.md`](../../README.md#architecture) shows a Mermaid overview of the
-same topology inline (GitHub renders it natively). When the code changes what the diagram
-shows, update the spec and the Mermaid block together.
+same topology inline (GitHub renders it natively). The rendered page is published at
+**[carlosmarroquin20.github.io/Vortex-Inference](https://carlosmarroquin20.github.io/Vortex-Inference/)**
+(GitHub Pages, served from the `gh-pages` branch so `main` stays free of build artifacts).
+When the code changes what the diagram shows, update the spec and the Mermaid block
+together, then re-render, re-run `add_csp.py` and replace the page on `gh-pages`.
 
 ## Render
 

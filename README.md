@@ -39,10 +39,10 @@ drawn once because both build it from the same configuration. KEDA scales the AP
 Deployment on `sum(vortex_inference_active_requests)` and the `vortex-worker`
 Deployment on the length of the `vortex.jobs` queue.
 
-> **Interactive version:** the same topology is authored as a validated
-> [Archify JSON spec](docs/diagrams/vortex-architecture.json) (diagram-as-code) and
-> renders to an explorable map with pan/zoom and guided views; see
-> [docs/diagrams](docs/diagrams/README.md) to render it.
+> **▶ [Open the interactive system map](https://carlosmarroquin20.github.io/Vortex-Inference/vortex-architecture.html)**
+> — the same topology as an explorable map (pan/zoom, guided views, theme toggle),
+> authored as a validated [Archify JSON spec](docs/diagrams/vortex-architecture.json)
+> (diagram-as-code); see [docs/diagrams](docs/diagrams/README.md) to render it.
 
 **Data flow:** Client → LoadBalancer Service → FastAPI pod → inference backend (llama-cpp-python on a GGUF model, or a remote API) → response, buffered or streamed. In parallel: Prometheus scrapes `/metrics` every 15s. KEDA queries Prometheus every 15s and adjusts `spec.replicas` on the Deployment based on `sum(vortex_inference_active_requests)`.
 
