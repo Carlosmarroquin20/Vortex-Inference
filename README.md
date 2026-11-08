@@ -674,7 +674,8 @@ vortex-inference/
 │       └── upstream.py       # Status mapping shared by the remote backends
 ├── tests/                    # pytest suite against an in-process llama_cpp fake; integration/ needs RabbitMQ and Redis
 ├── docs/
-│   └── runbooks.md           # One runbook per alert, linked via runbook_url
+│   ├── runbooks.md           # One runbook per alert, linked via runbook_url
+│   └── diagrams/             # Architecture diagram as an Archify JSON spec (diagram-as-code)
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
 ├── k8s/
