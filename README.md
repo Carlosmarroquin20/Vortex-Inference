@@ -6,39 +6,45 @@ A production-grade MLOps platform for serving specialized Small Language Models 
 
 ## Architecture
 
-```
-                     ┌──────────────────────────────────────────────────┐
-                     │              Minikube Cluster                     │
-                     │                                                   │
-  Client Request     │  ┌─────────────┐      ┌──────────────────────┐  │
- ────────────────────►  │ LoadBalancer │─────►│  vortex-inference    │  │
-  (minikube tunnel)  │  │  Service    │      │  pod (FastAPI +       │  │
-                     │  └─────────────┘      │  llama-cpp-python)    │  │
-                     │                       │                       │  │
-                     │                       │  ┌─────────────────┐  │  │
-                     │                       │  │ /v1/*completions │  │  │
-                     │                       │  │ /health          │  │  │
-                     │                       │  │ /metrics ──────────────────►  Prometheus
-                     │                       │  └─────────────────┘  │  │
-                     │                       └──────────────────────┘  │
-                     │                                 │               │
-                     │              ┌──────────────────▼─────────────┐ │
-                     │              │         KEDA ScaledObject       │ │
-                     │              │  Prometheus trigger:            │ │
-                     │              │  sum(active_requests) / 3       │ │
-                     │              │  → scales Deployment 1..3       │ │
-                     │              └────────────────────────────────┘ │
-                     │                                                   │
-                     │  ┌──────────────────────────────────────────┐   │
-                     │  │  monitoring namespace                      │   │
-                     │  │  Prometheus ◄── ServiceMonitor            │   │
-                     │  │  Grafana                                   │   │
-                     │  │  AlertManager ◄── PrometheusRules         │   │
-                     │  └──────────────────────────────────────────┘   │
-                     └──────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    client(["Client<br/>OpenAI SDK · curl"])
+    otel["OTLP collector<br/>opt-in · e.g. Jaeger"]
+    remote["Remote LLM APIs<br/>OpenAI-compatible · Anthropic"]
+    subgraph k8s["Kubernetes (minikube) · vortex-inference + monitoring namespaces"]
+      prom["Prometheus<br/>Grafana · Alertmanager"]
+      api["Vortex API<br/>FastAPI /v1 · KEDA 1–3 pods"]
+      backend["Inference backend<br/>llama.cpp · remote · fallback"]
+      keda["KEDA<br/>ScaledObjects"]
+      mq[["RabbitMQ<br/>vortex.jobs · retry · dead"]]
+      redis[("Redis<br/>job records · 24h TTL")]
+      worker["vortex-worker<br/>same backend · KEDA 0–N pods"]
+    end
+    client ==>|REST · SSE · jobs| api
+    api ==>|generate · stream| backend
+    backend -.->|remote · fallback| remote
+    api -.->|OTLP spans| otel
+    prom -.->|scrape| api
+    keda -.->|active requests| prom
+    keda -.->|queue length| mq
+    api -->|publish job| mq
+    api -->|job status| redis
+    mq -->|consume| worker
+    worker -->|result| redis
+    worker -->|run job| backend
 ```
 
-**Data flow:** Client → LoadBalancer Service → FastAPI pod → llama-cpp-python (GGUF, CPU) → response. In parallel: Prometheus scrapes `/metrics` every 15s. KEDA queries Prometheus every 15s and adjusts `spec.replicas` on the Deployment based on `sum(vortex_inference_active_requests)`.
+The inference backend runs in-process in both the API and the worker pods; it is
+drawn once because both build it from the same configuration. KEDA scales the API
+Deployment on `sum(vortex_inference_active_requests)` and the `vortex-worker`
+Deployment on the length of the `vortex.jobs` queue.
+
+> **▶ [Open the interactive system map](https://carlosmarroquin20.github.io/Vortex-Inference/vortex-architecture.html)**
+> — the same topology as an explorable map (pan/zoom, guided views, theme toggle),
+> authored as a validated [Archify JSON spec](docs/diagrams/vortex-architecture.json)
+> (diagram-as-code); see [docs/diagrams](docs/diagrams/README.md) to render it.
+
+**Data flow:** Client → LoadBalancer Service → FastAPI pod → inference backend (llama-cpp-python on a GGUF model, or a remote API) → response, buffered or streamed. In parallel: Prometheus scrapes `/metrics` every 15s. KEDA queries Prometheus every 15s and adjusts `spec.replicas` on the Deployment based on `sum(vortex_inference_active_requests)`.
 
 **Asynchronous jobs:** Client → `POST /v1/jobs` → API writes the job to Redis and publishes it to RabbitMQ → 202. KEDA reads the queue length from RabbitMQ's management API and scales the `vortex-worker` Deployment from zero; a worker runs the job on the same backend and stores the result in Redis, where `GET /v1/jobs/{id}` reads it. See [Asynchronous Jobs](#asynchronous-jobs).
 
@@ -668,7 +674,8 @@ vortex-inference/
 │       └── upstream.py       # Status mapping shared by the remote backends
 ├── tests/                    # pytest suite against an in-process llama_cpp fake; integration/ needs RabbitMQ and Redis
 ├── docs/
-│   └── runbooks.md           # One runbook per alert, linked via runbook_url
+│   ├── runbooks.md           # One runbook per alert, linked via runbook_url
+│   └── diagrams/             # Architecture diagram as an Archify JSON spec (diagram-as-code)
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
 ├── k8s/
