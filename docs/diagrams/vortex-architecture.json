@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Vortex Inference — System Architecture",
+    "output": "vortex-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "sync-path",
+        "label": "Synchronous inference",
+        "focus": ["client", "api", "backend", "remote"],
+        "note": "Completions and chat, buffered or streamed (SSE), run on the backend in the API pod; remote APIs serve the remote profile or the fallback."
+      },
+      {
+        "id": "jobs",
+        "label": "Asynchronous jobs",
+        "focus": ["api", "rabbitmq", "redis", "worker", "keda"],
+        "note": "POST /v1/jobs records the job in Redis and queues it in RabbitMQ; a worker runs it and stores the result for GET /v1/jobs/{id}."
+      },
+      {
+        "id": "operations",
+        "label": "Scaling and observability",
+        "focus": ["prometheus", "keda", "rabbitmq", "api", "otel"],
+        "note": "KEDA scales the API on active requests and the workers on queue length; traces are exported over OTLP when configured."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "OpenAI SDK · curl",
+      "pos": [300, 40],
+      "size": [190, 64]
+    },
+    {
+      "id": "otel",
+      "type": "external",
+      "label": "OTLP collector",
+      "sublabel": "opt-in · e.g. Jaeger",
+      "pos": [590, 40],
+      "size": [180, 64]
+    },
+    {
+      "id": "remote",
+      "type": "cloud",
+      "label": "Remote LLM APIs",
+      "sublabel": "OpenAI-compatible · Anthropic",
+      "pos": [860, 40],
+      "size": [190, 64]
+    },
+    {
+      "id": "prometheus",
+      "type": "backend",
+      "label": "Prometheus",
+      "sublabel": "Grafana · Alertmanager",
+      "pos": [40, 248],
+      "size": [150, 64]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Vortex API",
+      "sublabel": "FastAPI /v1 · KEDA 1–3 pods",
+      "pos": [300, 240],
+      "size": [190, 80]
+    },
+    {
+      "id": "backend",
+      "type": "backend",
+      "label": "Inference backend",
+      "sublabel": "llama.cpp · remote · fallback",
+      "pos": [860, 248],
+      "size": [190, 64]
+    },
+    {
+      "id": "keda",
+      "type": "cloud",
+      "label": "KEDA",
+      "sublabel": "ScaledObjects",
+      "pos": [40, 420],
+      "size": [150, 64]
+    },
+    {
+      "id": "rabbitmq",
+      "type": "messagebus",
+      "label": "RabbitMQ",
+      "sublabel": "vortex.jobs · retry · dead",
+      "pos": [300, 420],
+      "size": [190, 64]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "job records · 24h TTL",
+      "pos": [590, 420],
+      "size": [180, 64]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "vortex-worker",
+      "sublabel": "same backend · KEDA 0–N pods",
+      "pos": [860, 420],
+      "size": [190, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Kubernetes (minikube) · vortex-inference + monitoring namespaces",
+      "wraps": ["prometheus", "api", "backend", "keda", "rabbitmq", "redis", "worker"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "client-api",
+      "from": "client",
+      "to": "api",
+      "label": "REST · SSE · jobs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "api-backend",
+      "from": "api",
+      "to": "backend",
+      "label": "generate · stream",
+      "variant": "emphasis"
+    },
+    {
+      "id": "backend-remote",
+      "from": "backend",
+      "to": "remote",
+      "label": "remote · fallback",
+      "variant": "dashed"
+    },
+    {
+      "id": "api-otel",
+      "from": "api",
+      "to": "otel",
+      "label": "OTLP spans",
+      "variant": "dashed"
+    },
+    {
+      "id": "prometheus-api",
+      "from": "prometheus",
+      "to": "api",
+      "label": "scrape",
+      "variant": "dashed"
+    },
+    {
+      "id": "keda-prometheus",
+      "from": "keda",
+      "to": "prometheus",
+      "label": "active requests",
+      "variant": "dashed"
+    },
+    {
+      "id": "keda-rabbitmq",
+      "from": "keda",
+      "to": "rabbitmq",
+      "label": "queue length",
+      "variant": "dashed"
+    },
+    {
+      "id": "api-rabbitmq",
+      "from": "api",
+      "to": "rabbitmq",
+      "label": "publish job"
+    },
+    {
+      "id": "api-redis",
+      "from": "api",
+      "to": "redis",
+      "label": "job status"
+    },
+    {
+      "id": "rabbitmq-worker",
+      "from": "rabbitmq",
+      "to": "worker",
+      "label": "consume",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[395, 540], [955, 540]]
+    },
+    {
+      "id": "worker-redis",
+      "from": "worker",
+      "to": "redis",
+      "label": "result"
+    },
+    {
+      "id": "worker-backend",
+      "from": "worker",
+      "to": "backend",
+      "label": "run job"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two ways in",
+      "items": [
+        "/v1/completions and /v1/chat/completions, buffered or streamed (SSE)",
+        "POST /v1/jobs answers 202; GET /v1/jobs/{id} returns the result",
+        "Jobs retry with backoff and dead-letter to vortex.jobs.dead"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Swappable backends",
+      "items": [
+        "local profile: llama.cpp on a GGUF model, no egress",
+        "remote profile: OpenAI-compatible APIs or Anthropic",
+        "Optional fallback backend with a circuit breaker"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Event-driven scaling",
+      "items": [
+        "API: Prometheus trigger, ceil(active requests / 3), 1–3 pods",
+        "Workers: RabbitMQ queue length, scaled from zero",
+        "Workers run at a lower priority than the API"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Quality gates",
+      "items": [
+        "CI grades 20 eval cases on the built image; fails below 85%",
+        "Alert rules with runbooks for latency, errors and jobs",
+        "One OpenTelemetry trace per job, API to worker via AMQP headers"
+      ]
+    }
+  ]
+}
