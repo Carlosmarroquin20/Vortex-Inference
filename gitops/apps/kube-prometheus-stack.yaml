@@ -64,7 +64,9 @@ spec:
               memory: 64Mi
         kube-state-metrics:
           image:
-            sha: 42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b
+            # Unlike the parent chart's sha values, this subchart's takes
+            # the algorithm prefix.
+            sha: sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b
           resources:
             requests:
               cpu: 20m
