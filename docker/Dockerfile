@@ -101,8 +101,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # with OpenMP threading by default, and the builder gets it implicitly from
 # build-essential, so its absence here only shows up when libllama.so loads.
 # Unpinned for the same reason as in the builder stage.
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# apt-get upgrade applies the Debian security updates published since the
+# base image was built. The digest-pinned base only moves through a reviewed
+# bump, and upstream rebuilds lag behind Debian's fixes by days: the
+# 2026-11-08 rebuild still shipped a zlib with two fixable HIGH CVEs. Only
+# packages already in the image are upgraded, all from the same release,
+# and the image scan in CI checks the result.
+# hadolint ignore=DL3005,DL3008
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     libgomp1 \
     libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
