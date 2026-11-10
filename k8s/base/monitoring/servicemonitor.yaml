@@ -17,6 +17,8 @@ metadata:
   # application namespace if Prometheus is configured to watch all namespaces.
   # We place it in the application namespace to keep monitoring config co-located
   # with the application manifests — consistent with the GitOps "app-of-apps" pattern.
+  # No namespaceSelector: a monitor then selects targets in its own namespace,
+  # which keeps each environment's copy (staging, prod) scraping only itself.
   namespace: vortex-inference
   labels:
     app.kubernetes.io/name: vortex-inference
@@ -52,9 +54,6 @@ spec:
     - sourceLabels: [__meta_kubernetes_node_name]
       targetLabel: node
 
-  namespaceSelector:
-    matchNames:
-    - vortex-inference
 
 ---
 # RabbitMQ's rabbitmq_prometheus plugin. /metrics carries broker-wide series
@@ -89,9 +88,6 @@ spec:
       vhost:
       - /
     interval: 30s
-  namespaceSelector:
-    matchNames:
-    - vortex-inference
 
 ---
 # Job workers have no Service (they serve no traffic), so they are scraped
@@ -117,6 +113,3 @@ spec:
     relabelings:
     - sourceLabels: [__meta_kubernetes_pod_node_name]
       targetLabel: node
-  namespaceSelector:
-    matchNames:
-    - vortex-inference
