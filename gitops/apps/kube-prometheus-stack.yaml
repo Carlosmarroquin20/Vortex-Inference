@@ -1,0 +1,111 @@
+# Prometheus and prometheus-operator, chart 91.9.0 as `make setup` installs.
+# Only what the environments use is enabled: the operator for the
+# ServiceMonitor, PodMonitor and PrometheusRule objects in k8s/base,
+# kube-state-metrics and kubelet metrics for the alerts, and Prometheus for
+# KEDA's scaler and the rollout analysis. Grafana, Alertmanager and
+# node-exporter stay off on a single-node cluster.
+#
+# Each image is pinned by digest through the chart's sha values.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 91.9.0
+    helm:
+      # The release name sets the service names, and k8s/base addresses
+      # Prometheus as kube-prometheus-stack-prometheus.monitoring.
+      releaseName: kube-prometheus-stack
+      valuesObject:
+        defaultRules:
+          create: false
+        grafana:
+          enabled: false
+        alertmanager:
+          enabled: false
+        nodeExporter:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        coreDns:
+          enabled: false
+        kubeApiServer:
+          enabled: false
+        prometheusOperator:
+          # The admission webhook needs a certificate job on every install;
+          # the PromQL in this repository is checked by promtool in CI.
+          admissionWebhooks:
+            enabled: false
+          tls:
+            enabled: false
+          image:
+            sha: 7c88d4e7bae63bd8d0f8da986054337c23b4472fa8d3c6817f5bc4b8407a2d6a
+          prometheusConfigReloader:
+            image:
+              sha: 06b52bd4dbe3ed6dd5905aadaf8b9987d9da4c31d37bb86deaadae68cee2d26b
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        kube-state-metrics:
+          image:
+            sha: 42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+        prometheus:
+          prometheusSpec:
+            image:
+              sha: b2a413d5a03ea6a76782a508d1c7947440bba3b973931a25676e278431891b01
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+            # Staging and prod deploy the same PrometheusRule. The operator
+            # scopes each copy to its own namespace, so the rules carry no
+            # namespace matchers and alerts say which environment fired.
+            # The chart's own monitors scrape objects in other namespaces
+            # (kubelet, kube-state-metrics) and keep their labels as found.
+            enforcedNamespaceLabel: namespace
+            excludedFromEnforcement:
+            - group: monitoring.coreos.com
+              resource: servicemonitors
+              namespace: monitoring
+            retention: 1d
+            scrapeInterval: 15s
+            evaluationInterval: 15s
+            resources:
+              requests:
+                cpu: 100m
+                memory: 384Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

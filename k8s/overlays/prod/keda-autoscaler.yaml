@@ -1,6 +1,6 @@
 # Three warm replicas: losing one pod (a node drain, a crash, the canary
-# step of a rollout) still leaves two serving, and the 60-90s model load is
-# never on the request path at normal load. Scales to four.
+# step of a rollout) still leaves two serving, and a model load is never on
+# the request path at normal load. Scales to four.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

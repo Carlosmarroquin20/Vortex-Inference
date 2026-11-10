@@ -1,0 +1,38 @@
+# The root Application. `make bootstrap-gitops` applies it once, after Argo
+# CD is up, with GITOPS_REPO and GITOPS_REVISION substituted; everything else
+# in the cluster comes from git through it.
+#
+# GITOPS_REVISION is a branch to track (main, by default) or a commit SHA
+# to pin, which is how CI brings a cluster up at exactly the commit it is
+# verifying. The patch carries both values into the child Applications that
+# read from this repository.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ${GITOPS_REPO}
+    targetRevision: ${GITOPS_REVISION}
+    path: gitops/apps
+    kustomize:
+      patches:
+      - target:
+          kind: Application
+          labelSelector: vortex.io/source=this-repo
+        patch: |-
+          - op: replace
+            path: /spec/source/repoURL
+            value: ${GITOPS_REPO}
+          - op: replace
+            path: /spec/source/targetRevision
+            value: ${GITOPS_REVISION}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

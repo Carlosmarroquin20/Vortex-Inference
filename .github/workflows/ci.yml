@@ -2,9 +2,11 @@ name: CI
 
 # Trigger on every push and PR to main.
 # Rationale: catching broken Dockerfiles or invalid k8s manifests before merge
-# is cheaper than a failed deployment to a shared environment. These checks
-# are intentionally lightweight — no cluster is provisioned, no model is
-# downloaded. The goal is fast feedback (< 3 minutes) on structural validity.
+# is cheaper than a failed deployment to a shared environment. Most checks
+# are structural and finish in minutes. Two run the real thing: the image job
+# scores the built image on the evaluation dataset with a small model, and
+# the GitOps job brings up a throwaway cluster from the pull request through
+# Argo CD.
 #
 # Runners are pinned to ubuntu-24.04 rather than ubuntu-latest: the latest
 # label moves to new Ubuntu releases on GitHub's schedule, changing
@@ -319,27 +321,42 @@ jobs:
           sudo tar -xzf "${archive}" -C /usr/local/bin kubeconform
 
       - name: Install kustomize
-        # Standalone and pinned rather than the runner's kubectl, whose
-        # version changes with runner image updates. v5.7.1 is the version
-        # embedded in kubectl 1.35, which `make deploy` uses.
-        env:
-          KUSTOMIZE_VERSION: v5.7.1
-          KUSTOMIZE_SHA256: ea375e7372f9aa029129d4b2d16c66b7750b7f1213c4f66f910d981c895818d8
-        run: |
-          archive="${RUNNER_TEMP}/kustomize.tar.gz"
-          curl -fsSL -o "${archive}" \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          echo "${KUSTOMIZE_SHA256}  ${archive}" | sha256sum --check --strict
-          sudo tar -xzf "${archive}" -C /usr/local/bin kustomize
+        uses: ./.github/actions/install-kustomize
 
       # yq ships with the ubuntu-24.04 runner image, so it is not downloaded
       # here; the pinned runner version keeps it stable.
 
-      - name: Render deployment profiles
+      - name: Render deployment profiles and GitOps sources
+        # The four application profiles, plus everything Argo CD renders
+        # from this repository: its own installation, the platform
+        # components and the cluster-scoped objects. The upstream manifests
+        # those reference are fetched, so a moved or deleted release asset
+        # fails here rather than in a cluster.
         run: |
-          mkdir -p "${RUNNER_TEMP}/rendered"
-          kustomize build k8s/base > "${RUNNER_TEMP}/rendered/local.yaml"
-          kustomize build k8s/overlays/remote > "${RUNNER_TEMP}/rendered/remote.yaml"
+          rendered="${RUNNER_TEMP}/rendered"
+          mkdir -p "${rendered}/gitops"
+          kustomize build k8s/base > "${rendered}/local.yaml"
+          for profile in remote staging prod; do
+            kustomize build "k8s/overlays/${profile}" > "${rendered}/${profile}.yaml"
+          done
+          for dir in gitops/apps gitops/cluster gitops/bootstrap/argocd gitops/platform/*/; do
+            kustomize build "${dir}" > "${rendered}/gitops/$(echo "${dir%/}" | tr / -).yaml"
+          done
+
+      - name: Every image is pinned by digest
+        # A tag can be moved after review; a digest cannot. Covers what Argo
+        # CD deploys (environments and platform). The local and remote
+        # profiles use the image `make build` loads into minikube, which has
+        # no registry digest.
+        run: |
+          unpinned=$(cat "${RUNNER_TEMP}"/rendered/{staging,prod}.yaml "${RUNNER_TEMP}"/rendered/gitops/*.yaml \
+            | grep -E '^\s*(- )?image: ' | grep -v '@sha256:' || true)
+          if [ -n "${unpinned}" ]; then
+            echo "Images without a digest:"
+            echo "${unpinned}"
+            exit 1
+          fi
+          echo "All images pinned by digest"
 
       - name: Validate core manifests (kubeconform)
         # Fully offline with respect to the cluster: schemas are fetched from
@@ -349,9 +366,10 @@ jobs:
         # indentation and typo mistakes surface.
         run: |
           kubeconform -strict -summary -kubernetes-version 1.35.9 \
-            -skip ScaledObject,TriggerAuthentication,ServiceMonitor,PodMonitor,PrometheusRule \
-            "${RUNNER_TEMP}/rendered/local.yaml" \
-            "${RUNNER_TEMP}/rendered/remote.yaml"
+            -skip ScaledObject,TriggerAuthentication,ServiceMonitor,PodMonitor,PrometheusRule,SealedSecret,Application \
+            "${RUNNER_TEMP}"/rendered/{local,remote,staging,prod}.yaml \
+            "${RUNNER_TEMP}"/rendered/gitops/gitops-apps.yaml \
+            "${RUNNER_TEMP}"/rendered/gitops/gitops-cluster.yaml
 
       - name: Validate CRD-based manifests (structure via yq)
         # Resources using third-party API groups (keda.sh, monitoring.coreos.com)
@@ -360,11 +378,15 @@ jobs:
         # contain the expected number of each, which catches a patch or
         # resource list that dropped one. Expected counts: the API and the
         # job workers each have a ScaledObject, and RabbitMQ has its own
-        # ServiceMonitor next to the API's.
+        # ServiceMonitor next to the API's. The GitOps environments carry
+        # their credentials as two SealedSecrets; the app of apps declares
+        # eight Applications.
         run: |
-          for profile in local remote; do
+          for profile in local remote staging prod; do
             rendered="${RUNNER_TEMP}/rendered/${profile}.yaml"
-            for expected in ScaledObject=2 TriggerAuthentication=1 ServiceMonitor=2 PodMonitor=1 PrometheusRule=1; do
+            expectations="ScaledObject=2 TriggerAuthentication=1 ServiceMonitor=2 PodMonitor=1 PrometheusRule=1"
+            case "${profile}" in staging|prod) expectations="${expectations} SealedSecret=2" ;; esac
+            for expected in ${expectations}; do
               kind="${expected%=*}"
               want="${expected#*=}"
               count=$(yq eval-all "[select(.kind == \"${kind}\" and has(\"apiVersion\") and has(\"metadata\") and has(\"spec\"))] | length" "${rendered}")
@@ -375,6 +397,12 @@ jobs:
             done
             echo "Profile ${profile}: CRD-based resources present and well-formed"
           done
+          apps=$(yq eval-all '[select(.kind == "Application" and has("spec"))] | length' \
+            "${RUNNER_TEMP}/rendered/gitops/gitops-apps.yaml")
+          if [ "${apps}" != "8" ]; then
+            echo "gitops/apps: expected 8 Applications, found ${apps}"
+            exit 1
+          fi
 
       - name: Install promtool
         # Verified like kubeconform above; only promtool is extracted from the
@@ -408,11 +436,50 @@ jobs:
         # Rudimentary secret scan: fails if any manifest contains patterns
         # that suggest a committed credential. Not a substitute for a proper
         # secret scanner (truffleHog, gitleaks) but catches obvious mistakes.
+        # The SealedSecrets are excluded: their values are ciphertext that
+        # only the cluster's controller can open, which is why they may be
+        # committed at all.
         run: |
           if grep -rE \
             "(password|secret|token|api_key)\s*[:=]\s*['\"]?[A-Za-z0-9+/]{16,}" \
-            k8s/ --include="*.yaml"; then
+            k8s/ gitops/ --include="*.yaml" --exclude="sealed-secrets.yaml"; then
             echo "Potential hardcoded secret detected in k8s manifests."
             exit 1
           fi
           echo "No hardcoded secrets detected."
+
+  # ---------------------------------------------------------------------------
+  # Job 7: GitOps bootstrap (pull requests)
+  # Brings up a kind cluster from the pull request's head commit with
+  # `make bootstrap-gitops` and lets Argo CD build the platform and both
+  # environments from git, so a change to the overlays, the Applications or
+  # the bootstrap is exercised before it merges. On main, the promotions in
+  # release.yml run the same bootstrap against each promotion commit.
+  #
+  # Dependabot pull requests get no repository secrets, and without the
+  # sealing key the environments cannot start; they skip this job.
+  # ---------------------------------------------------------------------------
+  gitops:
+    name: GitOps Bootstrap
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Bring up the cluster from this commit
+        uses: ./.github/actions/gitops-cluster
+        with:
+          revision: ${{ github.event.pull_request.head.sha }}
+          sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
+
+      - name: Smoke test both environments
+        run: |
+          for environment in staging prod; do
+            image=$(yq '.images[0] | .newName + ":" + .newTag + "@" + .digest' \
+              "k8s/overlays/${environment}/kustomization.yaml")
+            bash scripts/smoke-test.sh "vortex-${environment}" "${image}"
+          done
+
+      - name: Argo CD reverts a manual change
+        run: bash scripts/drift-check.sh vortex-prod

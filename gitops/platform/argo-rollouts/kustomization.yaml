@@ -1,0 +1,15 @@
+# Argo Rollouts v1.10.2. The upstream manifest at the release commit names
+# the image with the :latest tag; the digest below pins the v1.10.2 build.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argo-rollouts
+
+resources:
+- namespace.yaml
+- https://raw.githubusercontent.com/argoproj/argo-rollouts/be8a6221c6c9751cd14497f31a2cb3c33690375a/manifests/install.yaml
+
+images:
+- name: quay.io/argoproj/argo-rollouts
+  newTag: v1.10.2
+  digest: sha256:2a395642ea411ae7b09274a560c3934b16134dfe36f5ffaaa6054c8a21a2eecf
