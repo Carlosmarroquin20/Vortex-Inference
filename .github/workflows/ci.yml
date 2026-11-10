@@ -342,6 +342,15 @@ jobs:
           for dir in gitops/apps gitops/cluster gitops/bootstrap/argocd gitops/platform/*/; do
             kustomize build "${dir}" > "${rendered}/gitops/$(echo "${dir%/}" | tr / -).yaml"
           done
+          # The Helm-sourced Application, rendered with the chart version and
+          # values it declares, as Argo CD's repo server would.
+          app=gitops/apps/kube-prometheus-stack.yaml
+          yq '.spec.source.helm.valuesObject' "${app}" > "${RUNNER_TEMP}/kps-values.yaml"
+          helm template "$(yq '.spec.source.helm.releaseName' "${app}")" "$(yq '.spec.source.chart' "${app}")" \
+            --repo "$(yq '.spec.source.repoURL' "${app}")" \
+            --version "$(yq '.spec.source.targetRevision' "${app}")" \
+            --namespace "$(yq '.spec.destination.namespace' "${app}")" \
+            -f "${RUNNER_TEMP}/kps-values.yaml" > "${rendered}/gitops/helm-kube-prometheus-stack.yaml"
 
       - name: Every image is pinned by digest
         # A tag can be moved after review; a digest cannot. Covers what Argo
@@ -350,7 +359,7 @@ jobs:
         # no registry digest.
         run: |
           unpinned=$(cat "${RUNNER_TEMP}"/rendered/{staging,prod}.yaml "${RUNNER_TEMP}"/rendered/gitops/*.yaml \
-            | grep -E '^\s*(- )?image: ' | grep -v '@sha256:' || true)
+            | grep -E '^\s*(- )?image: |--prometheus-config-reloader=' | grep -v '@sha256:' || true)
           if [ -n "${unpinned}" ]; then
             echo "Images without a digest:"
             echo "${unpinned}"
