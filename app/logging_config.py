@@ -28,6 +28,7 @@ from opentelemetry import trace
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import tracing
+from app.metrics import HTTP_RESPONSE_DURATION_SECONDS, HTTP_RESPONSES_TOTAL
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -121,6 +122,21 @@ QUIET_PATHS = frozenset({"/health", "/health/live", "/health/ready", "/metrics"}
 
 _access_logger = logging.getLogger("vortex.access")
 
+_ROUTES = frozenset({"/v1/completions", "/v1/chat/completions", "/v1/jobs"})
+
+
+def metric_route(path: str) -> str:
+    """The route a path belongs to, as a bounded metric label.
+
+    Raw paths would give every job ID and every scanner's probe its own
+    series; anything outside the API's routes is counted as "other".
+    """
+    if path in _ROUTES:
+        return path
+    if path.startswith("/v1/jobs/"):
+        return "/v1/jobs/{job_id}"
+    return "other"
+
 
 class RequestContextMiddleware:
     """
@@ -165,7 +181,15 @@ class RequestContextMiddleware:
             await self.app(scope, receive, send_with_request_id)
         finally:
             path = scope.get("path", "")
-            level = logging.DEBUG if path in QUIET_PATHS else logging.INFO
+            duration = time.monotonic() - start
+            quiet = path in QUIET_PATHS
+            if not quiet:
+                route = metric_route(path)
+                HTTP_RESPONSES_TOTAL.labels(
+                    route=route, code=f"{status_code // 100}xx"
+                ).inc()
+                HTTP_RESPONSE_DURATION_SECONDS.labels(route=route).observe(duration)
+            level = logging.DEBUG if quiet else logging.INFO
             _access_logger.log(
                 level,
                 "Request completed.",
@@ -173,7 +197,7 @@ class RequestContextMiddleware:
                     "method": scope.get("method", ""),
                     "path": path,
                     "status": status_code,
-                    "duration_seconds": round(time.monotonic() - start, 4),
+                    "duration_seconds": round(duration, 4),
                 },
             )
             request_id_var.reset(token)
