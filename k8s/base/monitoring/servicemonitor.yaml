@@ -53,6 +53,12 @@ spec:
       targetLabel: pod
     - sourceLabels: [__meta_kubernetes_node_name]
       targetLabel: node
+    # Under Argo Rollouts (the GitOps environments) each revision's pods
+    # carry this hash; the canary analysis selects the canary's series by
+    # it. Pods of a plain Deployment have no such label, and an empty value
+    # adds no label.
+    - sourceLabels: [__meta_kubernetes_pod_label_rollouts_pod_template_hash]
+      targetLabel: rollouts_pod_template_hash
 
 
 ---

@@ -202,3 +202,48 @@ tests:
               runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsubmissionsfailing"
               summary: "Job submissions are failing: queue unavailable"
               description: "POST /v1/jobs has been answering 503 for 5m because the job queue (store is Redis, queue is RabbitMQ) cannot be reached. Check the vortex-redis and vortex-rabbitmq pods.\n"
+
+  # Two inference pods, both failing readiness from minute 5: the alert
+  # waits out its 2m hold, then fires. Before that, one ready pod is enough.
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_ready{container="inference-server", pod="vortex-inference-a"}'
+        values: "1x4 0x10"
+      - series: 'kube_pod_container_status_ready{container="inference-server", pod="vortex-inference-b"}'
+        values: "1x4 0x10"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VortexInferenceNoReadyPods
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: VortexInferenceNoReadyPods
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: VortexInferenceNoReadyPods
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: mlops
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencenoreadypods"
+              summary: "No ready inference pods — all traffic is being dropped"
+              description: "No vortex-inference pod has been ready for 2 minutes. Clients are receiving 503 responses. Check pod events for OOM kills, image pull failures, or failed readiness probes.\n"
+
+  # No inference pod exists at all (every replica deleted, or the workload
+  # never created): absent() fires the same alert.
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_ready{container="worker", pod="vortex-worker-a"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: VortexInferenceNoReadyPods
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: mlops
+              container: inference-server
+            exp_annotations:
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencenoreadypods"
+              summary: "No ready inference pods — all traffic is being dropped"
+              description: "No vortex-inference pod has been ready for 2 minutes. Clients are receiving 503 responses. Check pod events for OOM kills, image pull failures, or failed readiness probes.\n"
