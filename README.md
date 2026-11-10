@@ -681,6 +681,55 @@ The local workflow (`make build`) is unchanged. It still builds
 
 ---
 
+## GitOps: staging and prod
+
+Argo CD deploys two environments from this repository: `vortex-staging` and
+`vortex-prod`, defined by `k8s/overlays/staging` and `k8s/overlays/prod`.
+Nobody runs `kubectl apply` against them. A change reaches them only as a
+commit (see [ADR 0002](docs/adr/0002-gitops-with-argo-cd.md)).
+
+| | staging | prod |
+|---|---|---|
+| Namespace | `vortex-staging` | `vortex-prod` |
+| API replicas (KEDA) | 1–2 | 3–4 |
+| PodDisruptionBudget | `maxUnavailable: 1` | `minAvailable: 2` |
+| Image | written by CI after each release | the image staging verified |
+
+After [`release.yml`](.github/workflows/release.yml) verifies a new image, it
+promotes it in four steps, with no human approval:
+
+1. It commits the image's `tag@digest` to the staging overlay with
+   `kustomize edit set image`.
+2. It brings up a cluster from that commit and waits for Argo CD to report
+   every Application Synced and Healthy. It then runs the smoke test: the
+   promoted digest is serving, authenticated completions work, and
+   unauthenticated ones are rejected.
+3. If staging passes, it commits the same `tag@digest` to the prod overlay and
+   runs the same checks.
+4. It changes prod's replica floor by hand and requires Argo CD to revert the
+   change.
+
+To hand any single-node cluster (minikube, kind) to git:
+
+```bash
+make bootstrap-gitops                      # tracks main on GitHub
+make bootstrap-gitops GITOPS_REVISION=<sha> # or pins a commit
+```
+
+The bootstrap installs the Sealed Secrets key and Argo CD, then applies the
+root Application, which brings up everything else from `gitops/apps/` in
+order:
+
+- Argo CD itself;
+- Sealed Secrets, KEDA, Argo Rollouts and Prometheus;
+- the shared cluster objects;
+- both environments.
+
+The credentials of each environment are committed as SealedSecrets. Generate
+them again with `python scripts/seal_secrets.py environment <staging|prod>`.
+
+---
+
 ## Directory Structure
 
 ```
@@ -728,14 +777,30 @@ vortex-inference/
 │   │       ├── grafana-dashboard.json # Dashboard, provisioned via the Grafana sidecar
 │   │       ├── prometheus-rules.yaml  # PrometheusRule CRD — SLO alerts + recording rules
 │   │       └── servicemonitor.yaml    # ServiceMonitor/PodMonitor CRDs — scrape config
+│   ├── components/
+│   │   └── gitops-environment/ # What staging and prod share: GHCR image, model, no replicas field
 │   └── overlays/
-│       └── remote/           # Remote-backend profile: patches over base/
+│       ├── remote/           # Remote-backend profile: patches over base/
+│       ├── staging/          # GitOps environment: image written by CI, sealed credentials
+│       └── prod/             # GitOps environment: 3+ replicas, stricter PDB
+├── gitops/
+│   ├── bootstrap/            # Argo CD install and the root Application (make bootstrap-gitops)
+│   ├── apps/                 # App of apps: platform components and both environments
+│   ├── platform/             # Sealed Secrets, KEDA, Argo Rollouts, pinned by commit and digest
+│   ├── cluster/              # Cluster-scoped objects the environments share
+│   └── sealed-secrets/       # Public sealing certificate
 ├── evals/                    # Evaluation datasets and recorded baselines
 ├── scripts/
 │   ├── setup-minikube.sh     # Cluster bootstrap: Minikube + KEDA + kube-prometheus-stack
 │   ├── download-model.sh     # Pinned-revision GGUF download, SHA-256 verified, resumable
 │   ├── load-test.sh          # KEDA scale-out demonstration
-│   └── loadgen.py            # Client-side latency measurement (TTFT, TPOT, JSON reports)
+│   ├── loadgen.py            # Client-side latency measurement (TTFT, TPOT, JSON reports)
+│   ├── bootstrap-gitops.sh   # Hands a cluster to Argo CD (make bootstrap-gitops)
+│   ├── promote.sh            # Commits an image to an environment overlay (used by CI)
+│   ├── gitops-wait.sh        # Waits for Argo CD Applications to be Synced and Healthy
+│   ├── smoke-test.sh         # Checks an environment serves the expected image
+│   ├── drift-check.sh        # Proves Argo CD reverts a manual change
+│   └── seal_secrets.py       # Sealing key and per-environment SealedSecrets
 ├── requirements.txt          # Runtime dependencies (baked into the image)
 ├── requirements-dev.txt      # Test and lint tooling
 ├── pyproject.toml            # ruff, pytest and coverage configuration
