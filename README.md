@@ -728,6 +728,48 @@ order:
 The credentials of each environment are committed as SealedSecrets. Generate
 them again with `python scripts/seal_secrets.py environment <staging|prod>`.
 
+### Canary releases
+
+In staging and prod the API is an Argo Rollouts `Rollout`, not a Deployment.
+Every new revision goes through these steps:
+
+**10% → analysis → 50% → analysis → 100%**
+
+If an analysis fails, the rollout aborts. The canary is scaled away, and the
+stable pods, which served the whole time, keep all the traffic. See
+[ADR 0003](docs/adr/0003-canary-releases-with-argo-rollouts.md).
+
+- **Canary by replica count.** There is no traffic router, so the canary's
+  share of requests is its share of ready pods. In prod, 10% means one
+  canary pod next to three stable pods.
+- **The analysis only measures the canary.** The `vortex-canary`
+  AnalysisTemplate queries Prometheus filtered by `rollouts_pod_template_hash`.
+  For each 90-second window it checks three things:
+  - **Volume:** there must be enough requests to judge the canary. With no
+    data, the analysis fails instead of passing.
+  - **Error rate:** the rate of 5xx responses.
+  - **p95 latency:** end to end, measured at the HTTP layer.
+- **Thresholds come from a measured baseline.**
+  [`scripts/canary_baseline.py`](scripts/canary_baseline.py) runs the stable
+  version under the analysis load, using the existing `loadgen.py`, and
+  evaluates the same queries. The result is in
+  [`evals/baselines/canary.json`](evals/baselines/canary.json).
+- **`VORTEX_FAULT_RATE`** is a demo-only variable. It is off by default and
+  set in no profile. It makes the API answer that fraction of completions
+  with a 500, which simulates a bad version.
+
+[`scripts/demo-canary.sh`](scripts/demo-canary.sh) commits three releases to
+a branch that the cluster tracks:
+
+1. A good version. It has to reach 100%.
+2. The same version with `VORTEX_FAULT_RATE=0.5`. The analysis has to stop it.
+3. A `git revert` of the previous commit. It has to bring the Rollout back to
+   Healthy.
+
+CI runs the demo on every pull request and fails if any step ends
+differently. The GIF at the top of this README is that run, replayed as a
+time-lapse.
+
 ---
 
 ## Directory Structure
@@ -755,6 +797,7 @@ vortex-inference/
 ├── tests/                    # pytest suite against an in-process llama_cpp fake; integration/ needs RabbitMQ and Redis
 ├── docs/
 │   ├── adr/                  # Architecture decision records, with the alternatives rejected
+│   ├── demo/                 # VHS tape and the canary GIF it records
 │   └── runbooks.md           # One runbook per alert, linked via runbook_url
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
@@ -778,7 +821,7 @@ vortex-inference/
 │   │       ├── prometheus-rules.yaml  # PrometheusRule CRD — SLO alerts + recording rules
 │   │       └── servicemonitor.yaml    # ServiceMonitor/PodMonitor CRDs — scrape config
 │   ├── components/
-│   │   └── gitops-environment/ # What staging and prod share: GHCR image, model, no replicas field
+│   │   └── gitops-environment/ # Shared by staging and prod: GHCR image, model, Rollout + canary analysis
 │   └── overlays/
 │       ├── remote/           # Remote-backend profile: patches over base/
 │       ├── staging/          # GitOps environment: image written by CI, sealed credentials
@@ -800,7 +843,13 @@ vortex-inference/
 │   ├── gitops-wait.sh        # Waits for Argo CD Applications to be Synced and Healthy
 │   ├── smoke-test.sh         # Checks an environment serves the expected image
 │   ├── drift-check.sh        # Proves Argo CD reverts a manual change
-│   └── seal_secrets.py       # Sealing key and per-environment SealedSecrets
+│   ├── seal_secrets.py       # Sealing key and per-environment SealedSecrets
+│   ├── traffic.sh            # In-cluster client load (loadgen.py as a Job)
+│   ├── canary_baseline.py    # Measures the baseline the analysis thresholds come from
+│   ├── await-rollout.sh      # Follows a canary to 100% or fails on abort
+│   ├── rollout_status.py     # One-line canary status: step, pods, analysis values
+│   ├── demo-canary.sh        # Good release, bad release, git revert, end to end
+│   └── replay-log.sh         # Time-lapse replay of the demo transcript (VHS)
 ├── requirements.txt          # Runtime dependencies (baked into the image)
 ├── requirements-dev.txt      # Test and lint tooling
 ├── pyproject.toml            # ruff, pytest and coverage configuration
