@@ -1,0 +1,420 @@
+name: Release
+
+# Builds the inference image for linux/amd64 and linux/arm64, publishes it to
+# GitHub Container Registry and attaches the evidence a consumer needs to
+# trust it (ADR 0001):
+#
+#   - a keyless Sigstore signature (cosign), tied to this workflow's identity
+#     through GitHub's OIDC token, so there is no signing key to leak or rotate;
+#   - a SLSA build provenance attestation (actions/attest-build-provenance)
+#     stating which commit and which run produced the digest;
+#   - an SPDX SBOM per platform, signed as a cosign attestation and also kept
+#     as a workflow artifact, so the components can be audited without
+#     pulling the image.
+#
+# Each architecture is built natively on its own runner (ubuntu-24.04-arm for
+# arm64). Emulating arm64 with QEMU would compile llama.cpp in an emulator,
+# which takes hours instead of minutes.
+#
+# Triggers:
+#   push to main   build, publish as sha-<commit> and edge, sign, verify
+#   tag v*         no rebuild: the image main already built for that commit
+#                  gets the semver tags, so a release ships the exact digest
+#                  that went through the environments. Built only if main
+#                  never produced one (a tag on an unmerged commit).
+#   pull request   build and scan both architectures, publish nothing
+#
+# Everything downstream refers to the image by digest: a tag can be moved, a
+# digest cannot.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - app/**
+      - docker/**
+      - requirements.txt
+      - .dockerignore
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a publish half way: a pushed but unsigned digest is worse
+# than a slow pipeline. Superseded pull request builds are cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/carlosmarroquin20/vortex-inference
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide whether this run builds. A version tag reuses the image of its
+  # commit when main already published one.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      existing-digest: ${{ steps.plan.outputs.existing-digest }}
+    steps:
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Look for an image of this commit
+        id: plan
+        env:
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          if [ "${IS_TAG}" = "true" ] \
+            && digest=$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA::7}" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest) \
+            && [ -n "${digest}" ]; then
+            echo "Reusing ${IMAGE}@${digest}, built from ${GITHUB_SHA} on main"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "existing-digest=${digest}" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # One native build per architecture. Each is scanned before anything is
+  # pushed, then pushed by digest only; the publish job assembles the
+  # multi-architecture index and applies the tags.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      # Only main and version tags publish: their identity is what consumers
+      # verify against. Pull requests and manual runs elsewhere build only.
+      PUBLISH: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+      SCAN_TAG: vortex-inference:scan-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Derive OCI labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+
+      - name: Build for scanning
+        # Loaded into the runner's daemon so Trivy and Syft read exactly what
+        # was built. The push below reuses every layer from the cache.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: ${{ env.SCAN_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+
+      - name: Scan (Trivy)
+        # The release gate is CRITICAL findings that have a fix: those are
+        # the ones a rebuild or a dependency bump can remove, and nothing
+        # with one ships. The pull request gate in ci.yml also blocks fixable
+        # HIGH findings; here they are listed in the log without blocking, so
+        # a CVE published after a merge cannot strand a commit that already
+        # passed review. Unfixed findings have no remediation path and are
+        # left out of both gates.
+        run: |
+          trivy() {
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+              image --scanners vuln --ignore-unfixed --no-progress "$@" "${SCAN_TAG}"
+          }
+          trivy --severity HIGH --exit-code 0
+          trivy --severity CRITICAL --exit-code 1
+
+      - name: Generate the SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.SCAN_TAG }}
+          format: spdx-json
+          output-file: vortex-inference-${{ matrix.arch }}.spdx.json
+          upload-artifact: false
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push by digest
+        id: push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Untagged: the tags go on the multi-architecture index only, so no
+          # tag ever points at a single-platform image.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # BuildKit's own SBOM and provenance travel with the image as
+          # attestation manifests in the index.
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+
+      - name: Record the digest and the SBOM
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/out"
+          echo "${DIGEST}" > "${RUNNER_TEMP}/out/digest-${{ matrix.arch }}"
+          cp "vortex-inference-${{ matrix.arch }}.spdx.json" "${RUNNER_TEMP}/out/"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.PUBLISH == 'true'
+        with:
+          name: build-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Assemble the index, tag it, sign it and attach the attestations.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish and sign
+    needs: [plan, build]
+    if: >-
+      always()
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      && needs.plan.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push the index and the signatures
+      id-token: write # OIDC token for keyless signing and attestations
+      attestations: write # store the provenance attestation
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
+      tag: ${{ steps.index.outputs.tag }}
+    env:
+      BUILT: ${{ needs.plan.outputs.build }}
+      EXISTING_DIGEST: ${{ needs.plan.outputs.existing-digest }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: env.BUILT == 'true'
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/build
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ env.IMAGE }}
+          # main: sha-<commit> and edge. Tag v1.2.3: 1.2.3, 1.2 and latest.
+          # The sha tag is what the environments pin (with the digest).
+          tags: |
+            type=sha
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Create the multi-architecture index
+        id: index
+        run: |
+          tags=()
+          while IFS= read -r tag; do tags+=(--tag "${tag}"); done \
+            < <(jq -r '.tags[]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          annotations=()
+          while IFS= read -r annotation; do annotations+=(--annotation "${annotation}"); done \
+            < <(jq -r '.annotations[]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+
+          if [ "${BUILT}" = "true" ]; then
+            sources=()
+            for file in "${RUNNER_TEMP}"/build/digest-*; do
+              sources+=("${IMAGE}@$(cat "${file}")")
+            done
+            docker buildx imagetools create "${tags[@]}" "${annotations[@]}" "${sources[@]}"
+            sha_tag=$(jq -r '.tags[] | select(contains(":sha-"))' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+            digest=$(docker buildx imagetools inspect "${sha_tag}" --format '{{json .Manifest}}' | jq -r .digest)
+          else
+            # Tagging only: the existing index is copied unchanged, so the
+            # version tags resolve to the digest main signed.
+            docker buildx imagetools create "${tags[@]}" "${IMAGE}@${EXISTING_DIGEST}"
+            digest="${EXISTING_DIGEST}"
+            version_tag=$(jq -r '.tags[0]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+            resolved=$(docker buildx imagetools inspect "${version_tag}" --format '{{json .Manifest}}' | jq -r .digest)
+            if [ "${resolved}" != "${digest}" ]; then
+              echo "${version_tag} resolves to ${resolved}, expected ${digest}" >&2
+              exit 1
+            fi
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools inspect "${IMAGE}@${digest}"
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: env.BUILT == 'true'
+
+      - name: Sign the index and each platform image (keyless)
+        # --recursive signs the per-platform manifests too, so a check made
+        # against the digest a node actually pulls also finds a signature.
+        if: env.BUILT == 'true'
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: cosign sign --yes --recursive "${IMAGE}@${DIGEST}"
+
+      - name: Attest the SBOM of each platform image
+        if: env.BUILT == 'true'
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: |
+          for arch in amd64 arm64; do
+            platform_digest=$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw \
+              | jq -r --arg arch "${arch}" \
+                '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest')
+            cosign attest --yes --type spdxjson \
+              --predicate "${RUNNER_TEMP}/build/vortex-inference-${arch}.spdx.json" \
+              "${IMAGE}@${platform_digest}"
+          done
+
+      - name: Attest build provenance (SLSA)
+        if: env.BUILT == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### ${IMAGE}@${DIGEST}"
+            echo
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Verify from a clean runner of each architecture, with nothing from the
+  # build on disk: the signature and the attestations must check out against
+  # this workflow's identity, and the image must start on that platform.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify ${{ matrix.arch }}
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      DIGEST: ${{ needs.publish.outputs.digest }}
+      # Signed by this workflow, on main or on a version tag.
+      IDENTITY: ^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v.+)$
+      ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the signature
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity-regexp "${IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            --output json | jq '.[0].optional | {Subject, Issuer, githubWorkflowRef, githubWorkflowSha}'
+
+      - name: Verify the SBOM attestation of the ${{ matrix.arch }} image
+        run: |
+          platform_digest=$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw \
+            | jq -r --arg arch "${{ matrix.arch }}" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest')
+          cosign verify "${IMAGE}@${platform_digest}" \
+            --certificate-identity-regexp "${IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" > /dev/null
+          cosign verify-attestation "${IMAGE}@${platform_digest}" --type spdxjson \
+            --certificate-identity-regexp "${IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            | jq -r '.payload | @base64d | fromjson | .predicate.packages | "SBOM: \(length) packages"'
+
+      - name: Verify the build provenance
+        # Once is enough: the provenance covers the index, not a platform.
+        if: matrix.arch == 'amd64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo "${GITHUB_REPOSITORY}"
+
+      - name: Start the image on ${{ matrix.arch }}
+        # The native libraries load and the BLAS backend registers on this
+        # architecture's CPU baseline; the server module imports cleanly.
+        run: |
+          docker run --rm "${IMAGE}@${DIGEST}" python -c "
+          import platform, llama_cpp, app.main
+          print(platform.machine(), llama_cpp.__version__)"

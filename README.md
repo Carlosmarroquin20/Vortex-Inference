@@ -644,6 +644,43 @@ the pods' egress to it; the NetworkPolicies deny it by default.
 
 ---
 
+## Container Image
+
+Every commit on main is published to
+`ghcr.io/carlosmarroquin20/vortex-inference` by
+[`release.yml`](.github/workflows/release.yml) for `linux/amd64` and
+`linux/arm64`, each built natively on its own runner. Each image is tagged
+`sha-<commit>`, and version tags `v*` add `X.Y.Z`, `X.Y` and `latest` to that
+same digest without rebuilding it. Nothing with a fixable CRITICAL CVE is
+published. Every image is signed keylessly with cosign and carries an SPDX
+SBOM per platform and SLSA build provenance. See
+[ADR 0001](docs/adr/0001-publish-signed-multi-arch-images.md) for why it is
+built this way.
+
+To check an image before running it:
+
+```bash
+IMAGE=ghcr.io/carlosmarroquin20/vortex-inference@sha256:<digest>
+IDENTITY='^https://github\.com/Carlosmarroquin20/Vortex-Inference/\.github/workflows/release\.yml@refs/(heads/main|tags/v.+)$'
+
+# Signed by this repository's release workflow
+cosign verify "$IMAGE" --certificate-identity-regexp "$IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# SBOM of the platform image (resolve its digest from the index first)
+cosign verify-attestation --type spdxjson "<platform image>" \
+  --certificate-identity-regexp "$IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# SLSA provenance: which commit and which run built it
+gh attestation verify "oci://$IMAGE" --repo Carlosmarroquin20/Vortex-Inference
+```
+
+The local workflow (`make build`) is unchanged. It still builds
+`vortex-inference:1.0.0` and loads it into minikube.
+
+---
+
 ## Directory Structure
 
 ```
@@ -668,6 +705,7 @@ vortex-inference/
 │       └── upstream.py       # Status mapping shared by the remote backends
 ├── tests/                    # pytest suite against an in-process llama_cpp fake; integration/ needs RabbitMQ and Redis
 ├── docs/
+│   ├── adr/                  # Architecture decision records, with the alternatives rejected
 │   └── runbooks.md           # One runbook per alert, linked via runbook_url
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime

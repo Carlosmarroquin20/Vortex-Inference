@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "b009238d-1a40-498c-9e8e-68cf24d06039",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "D:\\CODE\\Projects\\Vortex-Inference\\docs\\diagrams\\vortex-architecture.json",
+  "output": "D:\\CODE\\Projects\\Vortex-Inference\\docs\\diagrams\\vortex-architecture.html",
+  "specification": {
+    "sha256": "4fe60d7980d10d4471744bcfcb2a8e6a161dddf7ddf2a76076ccd213eb4ea2ca",
+    "bytes": 6121
+  },
+  "artifact": {
+    "sha256": "f7c3fe298655d1c94e8e74fc116b763cd377dab4b62bc6f2ba513accc69e2fa3",
+    "bytes": 851649
+  }
+}
