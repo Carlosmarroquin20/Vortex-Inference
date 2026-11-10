@@ -45,27 +45,43 @@ COPY requirements.txt .
 # CPU portability: llama.cpp defaults to GGML_NATIVE=ON, i.e. -march=native,
 # which compiles for whatever CPU happens to run the build. An image built on
 # a CI runner with AVX-512 would then die with SIGILL on a node without it,
-# and only on that node. GGML_NATIVE=OFF with an explicit instruction set
-# pins the x86-64-v3 baseline (AVX2/FMA/F16C, Intel Haswell / AMD Zen and
-# newer), which every current cloud and desktop x86 CPU supports. AVX-512 is
-# left off on purpose: its speedup for quantized matmul is modest and it is
-# absent on many consumer and some cloud CPUs.
+# and only on that node. GGML_NATIVE=OFF with an explicit baseline per
+# architecture avoids that:
 #
-# GPU transition path: replace with CMAKE_ARGS="-DGGML_CUDA=on", switch to a
+#   amd64  x86-64-v3 (AVX2/FMA/F16C): Intel Haswell, AMD Zen and newer, i.e.
+#          every current cloud and desktop x86 CPU. AVX-512 is left off on
+#          purpose: its speedup for quantized matmul is modest and it is
+#          absent on many consumer and some cloud CPUs.
+#   arm64  ARMv8.2-A with dot product and FP16 arithmetic: AWS Graviton2 and
+#          newer, Ampere Altra, Azure Cobalt and Apple silicon. The dot
+#          product instructions are what make quantized matmul fast on ARM;
+#          plain ARMv8.0 would build everywhere and run several times slower.
+#
+# TARGETARCH is set by BuildKit for each platform being built. The image is
+# built natively on each architecture (see .github/workflows/release.yml), so
+# the compiler always targets the machine it runs on and no cross toolchain
+# is involved.
+#
+# GPU transition path: replace the flags with -DGGML_CUDA=on, switch to a
 # CUDA base image, and add --gpus flags to offload layers to VRAM.
-ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS \
--DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
--DGGML_AVX512=OFF"
+ARG TARGETARCH
 ENV FORCE_CMAKE=1
 
+# One pip wheel invocation covers every dependency, llama-cpp-python
+# included; building it separately first caused version conflicts when the
+# GHA layer cache held a stale wheel. CMAKE_ARGS is exported for this command
+# only, so the per-architecture flags never end up in the image environment.
+#
 # pip is not upgraded first: an unpinned `pip install --upgrade pip` made
 # the build depend on whatever pip release was current that day. The pip
 # shipped in the digest-pinned base image builds these wheels fine.
-RUN pip wheel --no-cache-dir --wheel-dir=/dist -r requirements.txt
-# Single pip wheel invocation covers all dependencies including llama-cpp-python.
-# CMAKE_ARGS and FORCE_CMAKE set above are inherited here, ensuring the C++
-# compilation uses OpenBLAS. Running llama-cpp-python as a separate step
-# first caused version conflicts when GHA layer cache held a stale wheel.
+RUN case "${TARGETARCH}" in \
+        amd64) cpu_flags="-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF" ;; \
+        arm64) cpu_flags="-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
+    esac \
+    && CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=OFF ${cpu_flags}" \
+       pip wheel --no-cache-dir --wheel-dir=/dist -r requirements.txt
 
 
 # =============================================================================
