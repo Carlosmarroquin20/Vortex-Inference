@@ -17,13 +17,12 @@ components:
 labels:
 - pairs:
     vortex.io/environment: staging
-  includeSelectors: false
 
 patches:
 - path: keda-autoscaler.yaml
 
 images:
-- name: vortex-inference
+- digest: sha256:d2ed416f677e70989478ed9764b3028a4ab18b51aa87c95b3f4bd650a2a946b7
+  name: vortex-inference
   newName: ghcr.io/carlosmarroquin20/vortex-inference
-  newTag: sha-a95e3c4
-  digest: sha256:4bc896c418a1c1586259375c2d4e6bd5e893364d48557d7964b5a9d9e4615172
+  newTag: sha-1b71fbb
