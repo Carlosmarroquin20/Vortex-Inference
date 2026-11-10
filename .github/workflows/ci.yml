@@ -182,9 +182,10 @@ jobs:
   # Validates the multi-stage Dockerfile compiles successfully.
   # llama-cpp-python compilation (~5–8 min) is the most common failure point
   # when system library versions or CMake flags change.
-  # The built image is NOT pushed. It is loaded into the runner's daemon so
-  # Trivy can scan exactly what was built, OS packages and Python packages,
-  # and so the evaluation dataset runs against that same image.
+  # The image is not pushed from here; release.yml publishes main. It is
+  # loaded into the runner's daemon so Trivy can scan exactly what was built,
+  # OS packages and Python packages, and so the evaluation dataset runs
+  # against that same image.
   # ---------------------------------------------------------------------------
   docker-build:
     name: Build Docker Image

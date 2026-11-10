@@ -98,6 +98,20 @@ async def queue_state(name: str) -> tuple[int, int]:
         return result.message_count, result.consumer_count
 
 
+async def settled_queue_state(name: str, expected: tuple[int, int]) -> tuple[int, int]:
+    """Queue state once it equals `expected`, or the last one seen within 5s.
+
+    The broker updates its consumer count asynchronously after a channel
+    closes, so a read made right after the worker returns can still count it.
+    """
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while True:
+        state = await queue_state(name)
+        if state == expected or asyncio.get_running_loop().time() >= deadline:
+            return state
+        await asyncio.sleep(0.1)
+
+
 async def wait_for_depth(name: str, depth: int) -> None:
     # Polled: the broker's queue state has no change notification.
     while True:
@@ -317,7 +331,7 @@ def test_shutdown_lets_the_job_in_progress_finish(topology):
                 stop.set()
             # The worker has returned: the job finished during the drain.
             job = await store.get(job_id)
-            depth, consumers = await queue_state(topology.queue)
+            depth, consumers = await settled_queue_state(topology.queue, (0, 0))
             return job, depth, consumers
         finally:
             await queue.close()
