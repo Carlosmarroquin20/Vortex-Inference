@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vortex-worker
+  namespace: vortex-inference
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 250m
+            memory: 768Mi
+          limits:
+            cpu: "1"
+            memory: 1536Mi

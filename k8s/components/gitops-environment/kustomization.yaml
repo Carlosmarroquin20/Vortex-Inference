@@ -1,0 +1,51 @@
+# What every GitOps-managed environment (staging, prod) changes from the base
+# profile. The overlays add what differs between them: namespace, image,
+# replica floor, disruption budget and sealed credentials. See ADR 0002.
+#
+# - The image comes from GHCR, pinned by tag and digest in each overlay, so
+#   the pull policy is IfNotPresent instead of the base's Never.
+# - spec.replicas is removed from the Deployment. KEDA owns the replica count;
+#   with the field in git, Argo CD's self-heal would reset every scale-out
+#   KEDA made back to the value in the manifest.
+# - The model is Qwen2.5-0.5B, the model the evaluation gate in CI scores
+#   (evals/baselines/). Each environment runs on a single node next to the
+#   control plane, Argo CD and the monitoring stack; Phi-3 at 2 CPU per
+#   replica would not fit staging and a three-replica prod together.
+# - Cluster-scoped objects (the model PersistentVolume, the PriorityClass)
+#   cannot be owned by two environments, so they move to gitops/cluster,
+#   which Argo CD syncs once per cluster.
+# - The LoadBalancer Service is dropped: on a cluster without a load
+#   balancer controller it never gets an address, and Argo CD would report
+#   the environment Progressing forever. Clients use the ClusterIP Service.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+- path: inference.yaml
+- path: worker.yaml
+- path: config.yaml
+- target:
+    kind: Deployment
+    name: vortex-inference
+  patch: |-
+    - op: remove
+      path: /spec/replicas
+- patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: vortex-model-pv
+- patch: |-
+    $patch: delete
+    apiVersion: scheduling.k8s.io/v1
+    kind: PriorityClass
+    metadata:
+      name: vortex-batch
+- patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: vortex-inference-lb
+      namespace: vortex-inference

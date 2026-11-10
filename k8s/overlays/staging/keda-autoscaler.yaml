@@ -1,0 +1,18 @@
+# One warm replica, scaling to two. The query is scoped to this namespace:
+# Prometheus scrapes every environment, and without the matcher staging would
+# scale on prod's traffic.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vortex-inference-scaler
+  namespace: vortex-inference
+spec:
+  minReplicaCount: 1
+  maxReplicaCount: 2
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+      query: sum(vortex_inference_active_requests{namespace="vortex-staging"})
+      threshold: "3"
+      ignoreNullValues: "true"

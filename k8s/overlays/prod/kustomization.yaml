@@ -1,0 +1,32 @@
+# Prod: receives only images that staging ran healthy. The release workflow
+# writes the tag and digest staging verified into the image below; nothing
+# else changes it (ADR 0002).
+#
+# Differences from staging: three replicas minimum instead of one, and a
+# disruption budget that keeps two of them serving through a drain.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vortex-prod
+
+resources:
+- ../../base
+- sealed-secrets.yaml
+
+components:
+- ../../components/gitops-environment
+
+labels:
+- pairs:
+    vortex.io/environment: prod
+  includeSelectors: false
+
+patches:
+- path: keda-autoscaler.yaml
+- path: pdb.yaml
+
+images:
+- name: vortex-inference
+  newName: ghcr.io/carlosmarroquin20/vortex-inference
+  newTag: sha-a95e3c4
+  digest: sha256:4bc896c418a1c1586259375c2d4e6bd5e893364d48557d7964b5a9d9e4615172
