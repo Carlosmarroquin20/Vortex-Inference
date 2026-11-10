@@ -375,7 +375,7 @@ jobs:
         # indentation and typo mistakes surface.
         run: |
           kubeconform -strict -summary -kubernetes-version 1.35.9 \
-            -skip ScaledObject,TriggerAuthentication,ServiceMonitor,PodMonitor,PrometheusRule,SealedSecret,Application \
+            -skip ScaledObject,TriggerAuthentication,ServiceMonitor,PodMonitor,PrometheusRule,SealedSecret,Application,Rollout,AnalysisTemplate \
             "${RUNNER_TEMP}"/rendered/{local,remote,staging,prod}.yaml \
             "${RUNNER_TEMP}"/rendered/gitops/gitops-apps.yaml \
             "${RUNNER_TEMP}"/rendered/gitops/gitops-cluster.yaml
@@ -388,13 +388,16 @@ jobs:
         # resource list that dropped one. Expected counts: the API and the
         # job workers each have a ScaledObject, and RabbitMQ has its own
         # ServiceMonitor next to the API's. The GitOps environments carry
-        # their credentials as two SealedSecrets; the app of apps declares
-        # eight Applications.
+        # their credentials as two SealedSecrets and run the API as a
+        # Rollout with its AnalysisTemplate; the app of apps declares eight
+        # Applications.
         run: |
           for profile in local remote staging prod; do
             rendered="${RUNNER_TEMP}/rendered/${profile}.yaml"
             expectations="ScaledObject=2 TriggerAuthentication=1 ServiceMonitor=2 PodMonitor=1 PrometheusRule=1"
-            case "${profile}" in staging|prod) expectations="${expectations} SealedSecret=2" ;; esac
+            case "${profile}" in
+              staging|prod) expectations="${expectations} SealedSecret=2 Rollout=1 AnalysisTemplate=1" ;;
+            esac
             for expected in ${expectations}; do
               kind="${expected%=*}"
               want="${expected#*=}"
@@ -458,28 +461,55 @@ jobs:
           echo "No hardcoded secrets detected."
 
   # ---------------------------------------------------------------------------
-  # Job 7: GitOps bootstrap (pull requests)
-  # Brings up a kind cluster from the pull request's head commit with
-  # `make bootstrap-gitops` and lets Argo CD build the platform and both
-  # environments from git, so a change to the overlays, the Applications or
-  # the bootstrap is exercised before it merges. On main, the promotions in
-  # release.yml run the same bootstrap against each promotion commit.
+  # Job 7: GitOps and canary (pull requests)
+  # Brings up a kind cluster with `make bootstrap-gitops` and lets Argo CD
+  # build the platform and both environments from git, so a change to the
+  # overlays, the Applications, the bootstrap or the rollout is exercised
+  # before it merges. Then, on that cluster:
+  #
+  #   - the smoke test of both environments and the drift check;
+  #   - scripts/demo-canary.sh: a good release must reach 100% of prod, a
+  #     release with VORTEX_FAULT_RATE=0.5 must be aborted by the analysis,
+  #     and git revert must restore the environment;
+  #   - the VHS recording of that run (docs/demo/canary.tape).
+  #
+  # The demonstration commits through git like any release, so the cluster
+  # tracks a throwaway branch created at the pull request's head and deleted
+  # afterwards. Pushes made with the workflow token trigger no workflows.
+  #
+  # When the AnalysisTemplate has no thresholds yet, the job measures the
+  # baseline they are derived from (scripts/canary_baseline.py) instead of
+  # running the demonstration.
   #
   # Dependabot pull requests get no repository secrets, and without the
   # sealing key the environments cannot start; they skip this job.
   # ---------------------------------------------------------------------------
   gitops:
-    name: GitOps Bootstrap
+    name: GitOps and Canary
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
+    permissions:
+      contents: write # the throwaway branch the demonstration commits to
+    env:
+      DEMO_BRANCH: ci/canary-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Bring up the cluster from this commit
+      - uses: ./.github/actions/install-kustomize
+
+      - name: Create the branch the cluster tracks
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push --quiet origin "HEAD:refs/heads/${DEMO_BRANCH}"
+
+      - name: Bring up the cluster from that branch
         uses: ./.github/actions/gitops-cluster
         with:
-          revision: ${{ github.event.pull_request.head.sha }}
+          revision: ${{ env.DEMO_BRANCH }}
           sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
 
       - name: Smoke test both environments
@@ -492,3 +522,58 @@ jobs:
 
       - name: Argo CD reverts a manual change
         run: bash scripts/drift-check.sh vortex-prod
+
+      - name: Are the analysis thresholds set?
+        id: thresholds
+        run: |
+          if grep -q 'value: "MIN_REQUESTS"' k8s/components/gitops-environment/analysis-template.yaml; then
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.thresholds.outputs.missing == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Measure the canary baseline
+        id: baseline
+        if: steps.thresholds.outputs.missing == 'true'
+        run: |
+          pip install --quiet pyyaml==6.0.3
+          python3 scripts/canary_baseline.py --namespace vortex-prod --json canary-baseline.json
+
+      - name: Canary demonstration
+        if: steps.thresholds.outputs.missing == 'false'
+        env:
+          DEMO_LOG: demo-canary.log
+        run: bash scripts/demo-canary.sh
+
+      - name: Record the demonstration (VHS)
+        if: steps.thresholds.outputs.missing == 'false'
+        run: |
+          docker run --rm -v "${PWD}:/vhs" \
+            ghcr.io/charmbracelet/vhs:v0.12.1@sha256:ea49a6a1c529be83153e88321892b5585964418f0b9055e8c1e0d732194234a3 \
+            docs/demo/canary.tape
+
+      - name: Collect rollout evidence
+        if: always()
+        run: |
+          mkdir -p evidence
+          cp demo-canary.log canary-baseline.json docs/demo/canary.gif evidence/ 2>/dev/null || true
+          kubectl get rollout,analysisrun -n vortex-prod -o yaml > evidence/prod-rollout.yaml 2>/dev/null || true
+          kubectl get events -n vortex-prod --sort-by=.lastTimestamp > evidence/prod-events.txt 2>/dev/null || true
+          kubectl get applications.argoproj.io -n argocd -o wide > evidence/applications.txt 2>/dev/null || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gitops-canary
+          path: evidence/
+          if-no-files-found: ignore
+
+      - name: Delete the throwaway branch
+        if: always()
+        run: git push --quiet origin --delete "${DEMO_BRANCH}" || true

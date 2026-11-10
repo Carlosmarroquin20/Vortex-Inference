@@ -467,6 +467,11 @@ jobs:
           revision: main
           sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
 
+      - name: Start client traffic
+        # The analysis refuses to judge a canary without requests; in a
+        # long-lived environment real clients would provide them.
+        run: bash scripts/traffic.sh start vortex-staging 1800
+
       - name: Commit the image to the staging overlay
         id: promote
         run: |
@@ -477,10 +482,31 @@ jobs:
           echo "image=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
           echo "Staging -> \`${IMAGE_REF}\` in ${commit}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Argo CD rolls out the commit
+      - name: Canary with analysis (ADR 0003)
+        # Argo CD syncs the commit; Argo Rollouts takes the new revision
+        # through 10% -> analysis -> 50% -> analysis -> 100%, judged on the
+        # traffic started above. An aborted canary fails the job, and with
+        # it every later promotion.
         env:
           COMMIT: ${{ steps.promote.outputs.commit }}
-        run: bash scripts/gitops-wait.sh 600 "${COMMIT}" vortex-staging
+        run: |
+          bash scripts/await-rollout.sh vortex-staging "${COMMIT}"
+          bash scripts/gitops-wait.sh 300 "${COMMIT}" vortex-staging
+          bash scripts/traffic.sh stop vortex-staging
+
+      - name: Rollout evidence
+        if: always()
+        run: |
+          mkdir -p rollout-evidence
+          kubectl get rollout,analysisrun -n vortex-staging -o yaml > rollout-evidence/staging-rollout.yaml || true
+          kubectl get events -n vortex-staging --sort-by=.lastTimestamp > rollout-evidence/staging-events.txt || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: rollout-staging
+          path: rollout-evidence/
+          if-no-files-found: ignore
 
       - name: Smoke test staging
         run: bash scripts/smoke-test.sh vortex-staging "${IMAGE_REF}"
@@ -511,6 +537,11 @@ jobs:
           revision: main
           sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
 
+      - name: Start client traffic
+        # The analysis refuses to judge a canary without requests; in a
+        # long-lived environment real clients would provide them.
+        run: bash scripts/traffic.sh start vortex-prod 1800
+
       - name: Commit the staging image to the prod overlay
         id: promote
         run: |
@@ -520,10 +551,31 @@ jobs:
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
           echo "Prod -> \`${IMAGE_REF}\` in ${commit}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Argo CD rolls out the commit
+      - name: Canary with analysis (ADR 0003)
+        # Argo CD syncs the commit; Argo Rollouts takes the new revision
+        # through 10% -> analysis -> 50% -> analysis -> 100%, judged on the
+        # traffic started above. An aborted canary fails the job, and with
+        # it every later promotion.
         env:
           COMMIT: ${{ steps.promote.outputs.commit }}
-        run: bash scripts/gitops-wait.sh 600 "${COMMIT}" vortex-prod
+        run: |
+          bash scripts/await-rollout.sh vortex-prod "${COMMIT}"
+          bash scripts/gitops-wait.sh 300 "${COMMIT}" vortex-prod
+          bash scripts/traffic.sh stop vortex-prod
+
+      - name: Rollout evidence
+        if: always()
+        run: |
+          mkdir -p rollout-evidence
+          kubectl get rollout,analysisrun -n vortex-prod -o yaml > rollout-evidence/prod-rollout.yaml || true
+          kubectl get events -n vortex-prod --sort-by=.lastTimestamp > rollout-evidence/prod-events.txt || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: rollout-prod
+          path: rollout-evidence/
+          if-no-files-found: ignore
 
       - name: Smoke test prod
         run: bash scripts/smoke-test.sh vortex-prod "${IMAGE_REF}"
