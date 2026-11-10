@@ -234,11 +234,50 @@ def test_main_fails_only_when_nothing_succeeded(server):
     assert loadgen.main(["--url", server, "--requests", "1"]) == 1
 
 
+def test_duration_mode_keeps_sending_until_the_deadline(server):
+    started = time.perf_counter()
+
+    results, _ = loadgen.run(
+        config(
+            server, stream=False, endpoint="completions", requests=1, duration_s=0.5
+        ),
+        api_key=None,
+    )
+
+    # `requests` is ignored: two workers keep going for the whole duration.
+    assert len(results) > 2
+    assert all(r.ok for r in results)
+    assert time.perf_counter() - started == pytest.approx(0.5, abs=0.4)
+
+
+def test_main_can_write_the_report_to_stdout(server, capsys):
+    code = loadgen.main(
+        [
+            "--url",
+            server,
+            "--endpoint",
+            "completions",
+            "--requests",
+            "2",
+            "--quiet",
+            "--json",
+            "-",
+        ]
+    )
+
+    out = capsys.readouterr()
+    assert code == 0
+    report = json.loads(out.out.strip().splitlines()[-1])
+    assert report["summary"]["succeeded"] == 2
+    assert "[1/2]" not in out.err
+
+
 @pytest.mark.parametrize(
     "argv",
     [
         ["--url", "ftp://host"],
         ["--url", "http://host", "--concurrency", "0"],
+        ["--url", "http://host", "--duration", "0"],
     ],
 )
 def test_invalid_arguments_exit(argv):

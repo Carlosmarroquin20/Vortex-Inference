@@ -23,6 +23,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import statistics
@@ -72,6 +73,10 @@ class Config:
     temperature: float
     timeout_s: float
     prompts: list[str] = field(repr=False)
+    # When set, workers keep sending until this many seconds have passed and
+    # `requests` is ignored: steady load for as long as something (a canary
+    # analysis) is watching, rather than a fixed batch.
+    duration_s: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -180,12 +185,18 @@ def send(config: Config, api_key: str | None, index: int) -> Result:
 def run(
     config: Config, api_key: str | None, progress=None
 ) -> tuple[list[Result], float]:
-    counter = iter(range(config.requests))
+    if config.duration_s is None:
+        counter = iter(range(config.requests))
+    else:
+        counter = itertools.count()
+        deadline = time.monotonic() + config.duration_s
     lock = threading.Lock()
     results: list[Result] = []
 
     def worker() -> None:
         while True:
+            if config.duration_s is not None and time.monotonic() >= deadline:
+                return
             with lock:
                 index = next(counter, None)
             if index is None:
@@ -288,13 +299,23 @@ def format_summary(summary: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_args(argv: list[str] | None = None) -> tuple[Config, str | None, str | None]:
+def parse_args(
+    argv: list[str] | None = None,
+) -> tuple[Config, str | None, str | None, bool]:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--url", required=True, help="base URL, e.g. http://10.96.0.10")
     parser.add_argument("--endpoint", choices=["completions", "chat"], default="chat")
     parser.add_argument("--stream", action="store_true", help="stream responses (SSE)")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--requests", type=int, default=20)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        help="send for this many seconds instead of a fixed number of requests",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true", help="no per-request progress lines"
+    )
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--timeout", type=float, default=180.0, help="per request, s")
@@ -307,13 +328,17 @@ def parse_args(argv: list[str] | None = None) -> tuple[Config, str | None, str |
         help="environment variable holding the API key; read from the environment "
         "so the key never appears in the process list",
     )
-    parser.add_argument("--json", dest="json_path", help="write results to this file")
+    parser.add_argument(
+        "--json", dest="json_path", help='write results to this file ("-": stdout)'
+    )
     args = parser.parse_args(argv)
 
     if not args.url.startswith(("http://", "https://")):
         parser.error("--url must start with http:// or https://")
     if args.concurrency < 1 or args.requests < 1:
         parser.error("--concurrency and --requests must be at least 1")
+    if args.duration is not None and args.duration <= 0:
+        parser.error("--duration must be positive")
 
     prompts = DEFAULT_PROMPTS
     if args.prompts:
@@ -332,24 +357,31 @@ def parse_args(argv: list[str] | None = None) -> tuple[Config, str | None, str |
         temperature=args.temperature,
         timeout_s=args.timeout,
         prompts=prompts,
+        duration_s=args.duration,
     )
-    return config, os.environ.get(args.api_key_env), args.json_path
+    return config, os.environ.get(args.api_key_env), args.json_path, args.quiet
 
 
 def main(argv: list[str] | None = None) -> int:
-    config, api_key, json_path = parse_args(argv)
+    config, api_key, json_path, quiet = parse_args(argv)
 
     def progress(result: Result, done: int, total: int) -> None:
         status = "ok" if result.ok else f"FAILED {result.status or ''} {result.error}"
-        print(f"  [{done}/{total}] {result.latency_s:7.2f}s {status}", file=sys.stderr)
+        of = "" if config.duration_s is not None else f"/{total}"
+        print(f"  [{done}{of}] {result.latency_s:7.2f}s {status}", file=sys.stderr)
 
     mode = "streamed" if config.stream else "buffered"
+    amount = (
+        f"{mode} {config.endpoint} requests for {config.duration_s:g}s"
+        if config.duration_s is not None
+        else f"{config.requests} {mode} {config.endpoint} requests"
+    )
     print(
-        f"{config.requests} {mode} {config.endpoint} requests, concurrency "
-        f"{config.concurrency}, max_tokens {config.max_tokens} -> {config.url}",
+        f"{amount}, concurrency {config.concurrency}, "
+        f"max_tokens {config.max_tokens} -> {config.url}",
         file=sys.stderr,
     )
-    results, wall = run(config, api_key, progress)
+    results, wall = run(config, api_key, None if quiet else progress)
     summary = summarize(results, wall)
     print(format_summary(summary))
 
@@ -359,9 +391,13 @@ def main(argv: list[str] | None = None) -> int:
             "summary": summary,
             "results": [asdict(r) for r in results],
         }
-        with open(json_path, "w", encoding="utf-8") as fh:
-            json.dump(report, fh, indent=2)
-        print(f"results written to {json_path}", file=sys.stderr)
+        if json_path == "-":
+            json.dump(report, sys.stdout)
+            print()
+        else:
+            with open(json_path, "w", encoding="utf-8") as fh:
+                json.dump(report, fh, indent=2)
+            print(f"results written to {json_path}", file=sys.stderr)
 
     # Nonzero only when nothing worked, which points at the setup (URL, key,
     # network) rather than at the load; partial failures are the measurement.

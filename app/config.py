@@ -215,6 +215,14 @@ class Settings(BaseSettings):
     # anyone who can reach the service. Enable explicitly for local work.
     enable_docs: bool = False
 
+    # --- Release demonstration ---
+    # Fraction of completion requests (0 to 1) answered with an injected 500
+    # before reaching the engine. It exists to stand in for a bad release in
+    # the canary demonstration (scripts/demo-canary.sh): a release with it
+    # set must be stopped by the rollout analysis. Zero, the default, leaves
+    # the request path untouched; no deployment profile sets it.
+    fault_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+
     @field_validator(
         "api_key",
         "remote_api_key",

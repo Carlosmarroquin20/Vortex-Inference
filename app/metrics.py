@@ -32,6 +32,43 @@ INFERENCE_DURATION_SECONDS = Histogram(
     buckets=[0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0, 120.0, float("inf")],
 )
 
+# What a client sees, measured at the HTTP layer for the API routes: every
+# response, including the ones that never reach the engine (authentication
+# failures, validation errors, overload rejections, injected faults). The
+# canary analysis reads these (k8s/components/gitops-environment): the
+# inference metrics above say how the engine behaved, these say whether the
+# release answers. Probes and scrapes are excluded, as from the access log.
+HTTP_RESPONSES_TOTAL = Counter(
+    "vortex_http_responses_total",
+    "API responses by route and status class.",
+    ["route", "code"],  # code: "2xx" | "3xx" | "4xx" | "5xx"
+)
+
+HTTP_RESPONSE_DURATION_SECONDS = Histogram(
+    "vortex_http_response_duration_seconds",
+    "Time from request arrival until the last byte of the response was sent, "
+    "by route. Includes the queue wait for an inference permit; for streamed "
+    "responses, the whole stream.",
+    ["route"],
+    buckets=[
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        5.0,
+        7.5,
+        10.0,
+        15.0,
+        30.0,
+        60.0,
+        120.0,
+        float("inf"),
+    ],
+)
+
 QUEUE_WAIT_SECONDS = Histogram(
     "vortex_inference_queue_wait_seconds",
     "Time a request waited for the inference permit before starting. "

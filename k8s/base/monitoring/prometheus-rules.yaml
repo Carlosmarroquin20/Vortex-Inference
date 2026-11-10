@@ -172,9 +172,17 @@ spec:
     rules:
     # Detects when no pods are ready to serve traffic. This fires before
     # users notice 503s because it triggers on readiness, not on error rates.
+    #
+    # Read from the inference containers rather than from the workload's
+    # status: the API is a Deployment in the local profile and an Argo
+    # Rollouts Rollout in the GitOps environments, and kube-state-metrics
+    # only exports workload status for Deployments. absent() covers the case
+    # where no inference pod exists at all, which leaves no series to compare.
     - alert: VortexInferenceNoReadyPods
       expr: |
-        kube_deployment_status_replicas_ready{deployment="vortex-inference"} == 0
+        sum(kube_pod_container_status_ready{container="inference-server"}) == 0
+        or
+        absent(kube_pod_container_status_ready{container="inference-server"})
       for: 2m
       labels:
         severity: critical
@@ -183,7 +191,7 @@ spec:
         runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencenoreadypods"
         summary: "No ready inference pods — all traffic is being dropped"
         description: >
-          The vortex-inference Deployment has 0 ready replicas for 2 minutes.
+          No vortex-inference pod has been ready for 2 minutes.
           Clients are receiving 503 responses. Check pod events for OOM kills,
           image pull failures, or failed readiness probes.
 

@@ -30,6 +30,7 @@ import functools
 import hmac
 import json
 import logging
+import random
 import threading
 import time
 import uuid
@@ -44,8 +45,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from opentelemetry.trace import Span
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from starlette.responses import Response, StreamingResponse
-from starlette.types import Receive, Scope, Send
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import tracing
 from app.backends import (
@@ -310,6 +311,48 @@ app = FastAPI(
         "operation_spans": False,
     },
 )
+
+
+class FaultInjectionMiddleware:
+    """
+    Answers a fraction of completion requests with a 500 before they reach
+    the engine, to stand in for a bad release (see Settings.fault_rate).
+
+    Installed only when the rate is above zero, so a normal deployment has
+    nothing extra on its request path. It sits inside RequestContextMiddleware,
+    which therefore logs and counts the injected failures like real ones; that
+    is what the canary analysis must see.
+    """
+
+    _PATHS = frozenset({"/v1/completions", "/v1/chat/completions"})
+
+    def __init__(self, app: ASGIApp, rate: float) -> None:
+        self.app = app
+        self.rate = rate
+        # Not for cryptographic use: it only decides which requests fail.
+        self._random = random.Random()  # noqa: S311
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] == "http"
+            and scope["path"] in self._PATHS
+            and self._random.random() < self.rate
+        ):
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "Injected fault (VORTEX_FAULT_RATE)."},
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+if settings.fault_rate > 0:
+    logger.warning(
+        "Fault injection is on: %.0f%% of completion requests will fail with 500.",
+        settings.fault_rate * 100,
+    )
+    app.add_middleware(FaultInjectionMiddleware, rate=settings.fault_rate)
 app.add_middleware(RequestContextMiddleware)
 
 
