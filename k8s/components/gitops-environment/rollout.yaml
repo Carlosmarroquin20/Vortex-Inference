@@ -1,0 +1,61 @@
+# Turns the base Deployment into an Argo Rollouts Rollout (ADR 0003). The
+# pod template, selector and everything the base and this component set on
+# them stay as they are; only the kind and the update strategy change, so
+# `make deploy` keeps its Deployment and the GitOps environments get a
+# canary.
+#
+# Canary by replica count, with no traffic router: the canary receives the
+# share of requests its pods are of all ready pods behind the Service.
+# setWeight is therefore a target that Rollouts rounds up to whole pods. In
+# prod (three replicas) 10% is one canary pod next to three stable ones,
+# a quarter of the traffic, and 50% is two next to two.
+#
+# Each analysis step runs the vortex-canary AnalysisTemplate against the
+# canary's own pods. A failed analysis aborts the rollout: the canary is
+# scaled away and the stable pods, which never stopped serving, keep all
+# the traffic. A canary that does not become ready within the progress
+# deadline is aborted the same way.
+- op: replace
+  path: /apiVersion
+  value: argoproj.io/v1alpha1
+- op: replace
+  path: /kind
+  value: Rollout
+- op: add
+  path: /spec/progressDeadlineSeconds
+  value: 600
+- op: add
+  path: /spec/progressDeadlineAbort
+  value: true
+- op: replace
+  path: /spec/strategy
+  value:
+    canary:
+      # Same zero-downtime surge as the base Deployment's rolling update.
+      maxSurge: 1
+      maxUnavailable: 0
+      steps:
+      - setWeight: 10
+      - analysis:
+          templates:
+          - templateName: vortex-canary
+          args:
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+          - name: namespace
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+      - setWeight: 50
+      - analysis:
+          templates:
+          - templateName: vortex-canary
+          args:
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+          - name: namespace
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace

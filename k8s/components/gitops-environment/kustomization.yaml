@@ -17,8 +17,15 @@
 # - The LoadBalancer Service is dropped: on a cluster without a load
 #   balancer controller it never gets an address, and Argo CD would report
 #   the environment Progressing forever. Clients use the ClusterIP Service.
+#
+# The API is an Argo Rollouts Rollout here, released as a canary gated by
+# the vortex-canary analysis (ADR 0003); rollout.yaml converts the base
+# Deployment after every Deployment patch above it has been applied.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
+
+resources:
+- analysis-template.yaml
 
 patches:
 - path: inference.yaml
@@ -30,6 +37,23 @@ patches:
   patch: |-
     - op: remove
       path: /spec/replicas
+- target:
+    group: apps
+    kind: Deployment
+    name: vortex-inference
+  path: rollout.yaml
+# KEDA scales the Rollout through its scale subresource, as it scaled the
+# Deployment.
+- target:
+    kind: ScaledObject
+    name: vortex-inference-scaler
+  patch: |-
+    - op: replace
+      path: /spec/scaleTargetRef/apiVersion
+      value: argoproj.io/v1alpha1
+    - op: replace
+      path: /spec/scaleTargetRef/kind
+      value: Rollout
 - patch: |-
     $patch: delete
     apiVersion: v1
