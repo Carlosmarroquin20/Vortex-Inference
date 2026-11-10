@@ -1,0 +1,20 @@
+name: Install kustomize
+description: >-
+  Installs the standalone kustomize, pinned and checksum-verified, rather
+  than relying on the runner's kubectl, whose version changes with runner
+  image updates. v5.7.1 is the version embedded in kubectl 1.35, which
+  `make deploy` uses.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        KUSTOMIZE_VERSION: v5.7.1
+        KUSTOMIZE_SHA256: ea375e7372f9aa029129d4b2d16c66b7750b7f1213c4f66f910d981c895818d8
+      run: |
+        archive="${RUNNER_TEMP}/kustomize.tar.gz"
+        curl -fsSL -o "${archive}" \
+          "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+        echo "${KUSTOMIZE_SHA256}  ${archive}" | sha256sum --check --strict
+        sudo tar -xzf "${archive}" -C /usr/local/bin kustomize

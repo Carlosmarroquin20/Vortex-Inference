@@ -1,0 +1,18 @@
+# Three warm replicas: losing one pod (a node drain, a crash, the canary
+# step of a rollout) still leaves two serving, and a model load is never on
+# the request path at normal load. Scales to four.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vortex-inference-scaler
+  namespace: vortex-inference
+spec:
+  minReplicaCount: 3
+  maxReplicaCount: 4
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+      query: sum(vortex_inference_active_requests{namespace="vortex-prod"})
+      threshold: "3"
+      ignoreNullValues: "true"

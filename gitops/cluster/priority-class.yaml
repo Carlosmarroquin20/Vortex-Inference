@@ -1,0 +1,12 @@
+# Same object as in k8s/base/worker.yaml, where the reasoning is documented;
+# keep the two identical.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: vortex-batch
+  labels:
+    app.kubernetes.io/part-of: vortex-inference
+value: -100
+preemptionPolicy: Never
+globalDefault: false
+description: Asynchronous inference jobs; preempted first when interactive pods need room.

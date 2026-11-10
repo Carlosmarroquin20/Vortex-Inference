@@ -52,7 +52,7 @@ FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # .PHONY declares targets that are not files. Without this, make would skip
 # a target if a file with the same name existed in the directory.
-.PHONY: help setup model build api-key show-api-key provider-key jobs-secrets require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen eval tunnel clean
+.PHONY: help setup model build api-key show-api-key provider-key jobs-secrets require-provider-key grafana-password dashboard deploy undeploy status logs metrics test test-integration load-test loadgen eval tunnel clean bootstrap-gitops
 
 # =============================================================================
 # Default target — always show help first
@@ -72,6 +72,9 @@ help:
 	@printf "    make jobs-secrets  Create the RabbitMQ and Redis credentials if missing\n"
 	@printf "    make dashboard   Provision the Grafana dashboard via the sidecar\n"
 	@printf "    make deploy      Apply the manifests (PROFILE=local|remote, default local)\n"
+	@echo ""
+	@printf "  $(GREEN)GitOps$(NC)\n"
+	@printf "    make bootstrap-gitops  Install Argo CD; git then drives staging and prod\n"
 	@echo ""
 	@printf "  $(GREEN)Operations$(NC)\n"
 	@printf "    make status      Show pods, ScaledObject, and HPA state\n"
@@ -245,6 +248,16 @@ undeploy:
 	@kubectl delete -f k8s/base/deployment.yaml --ignore-not-found
 	@kubectl delete -f k8s/base/service.yaml --ignore-not-found
 	@printf "$(YELLOW)[undeploy]$(NC) Workload removed. Monitoring stack intact.\n"
+
+# Hands the cluster in the current kubectl context to Argo CD: installs the
+# Sealed Secrets key and Argo CD, then applies the root Application, which
+# brings up the platform and the staging and prod environments from git.
+# Independent of `make deploy`, which keeps applying the local profile
+# directly. Override what Argo CD tracks with GITOPS_REPO and GITOPS_REVISION;
+# the sealing key comes from .secrets/sealed-secrets.key or SEALED_SECRETS_KEY.
+# Needs a single-node cluster with room for both environments (~6 CPU, 10GB).
+bootstrap-gitops:
+	@bash scripts/bootstrap-gitops.sh
 
 # =============================================================================
 # Operations

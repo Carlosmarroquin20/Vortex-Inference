@@ -1,0 +1,10 @@
+# Cluster-scoped objects the environments share. A cluster-scoped object can
+# only belong to one Argo CD Application; defined in both environment
+# overlays, staging and prod would fight over it. The overlays drop them
+# (k8s/components/gitops-environment) and this Application owns them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- model-volumes.yaml
+- priority-class.yaml

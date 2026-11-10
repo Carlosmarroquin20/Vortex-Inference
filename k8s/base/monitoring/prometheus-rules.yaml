@@ -4,6 +4,13 @@
 # enforce them. The alerting philosophy here is: alert on symptoms, not causes.
 # "High P99 latency" is a symptom. "CPU throttling" is a cause — let dashboards
 # surface causes; let alerts surface symptoms that require immediate action.
+#
+# No expression names a namespace. The same rules are deployed into each
+# environment's namespace (vortex-inference locally, vortex-staging and
+# vortex-prod under GitOps). The Prometheus in gitops/platform sets
+# enforcedNamespaceLabel, so prometheus-operator scopes every selector in a
+# copy to that copy's namespace and labels the resulting alerts with it.
+# A single namespace, as in the local profile, needs no scoping.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -167,10 +174,7 @@ spec:
     # users notice 503s because it triggers on readiness, not on error rates.
     - alert: VortexInferenceNoReadyPods
       expr: |
-        kube_deployment_status_replicas_ready{
-          namespace="vortex-inference",
-          deployment="vortex-inference"
-        } == 0
+        kube_deployment_status_replicas_ready{deployment="vortex-inference"} == 0
       for: 2m
       labels:
         severity: critical
@@ -188,7 +192,7 @@ spec:
     # pollingInterval (15s) + pod startup time (~90s).
     - alert: VortexInferencePersistentQueuePressure
       expr: |
-        sum(vortex_inference_active_requests{namespace="vortex-inference"}) > 5
+        sum(vortex_inference_active_requests) > 5
       for: 10m
       labels:
         severity: warning
@@ -199,7 +203,7 @@ spec:
         description: >
           Active request count is {{ $value }} and has not decreased in 10m.
           If KEDA is functioning correctly, this should have triggered scale-out.
-          Check ScaledObject status: kubectl describe scaledobject vortex-inference-scaler -n vortex-inference
+          Check ScaledObject status: kubectl describe scaledobject vortex-inference-scaler -n {{ $labels.namespace }}
 
     # Memory pressure alert: fires when a pod approaches 90% of its 4Gi limit.
     # At this level, any allocation spike (e.g., a long context completion) risks
@@ -207,16 +211,9 @@ spec:
     - alert: VortexInferencePodHighMemoryUsage
       expr: |
         (
-          container_memory_working_set_bytes{
-            namespace="vortex-inference",
-            container="inference-server"
-          }
+          container_memory_working_set_bytes{container="inference-server"}
           /
-          kube_pod_container_resource_limits{
-            namespace="vortex-inference",
-            container="inference-server",
-            resource="memory"
-          }
+          kube_pod_container_resource_limits{container="inference-server", resource="memory"}
         ) > 0.90
       for: 5m
       labels:
@@ -237,10 +234,7 @@ spec:
     - alert: VortexInferenceFrequentRestarts
       expr: |
         increase(
-          kube_pod_container_status_restarts_total{
-            namespace="vortex-inference",
-            container="inference-server"
-          }[15m]
+          kube_pod_container_status_restarts_total{container="inference-server"}[15m]
         ) > 2
       labels:
         severity: warning
@@ -252,7 +246,7 @@ spec:
           Pod {{ $labels.pod }} has restarted {{ $value }} times in the last 15m.
           This pattern typically indicates OOM during model loading or a missing
           model file at the PVC mount path. Check pod logs:
-          kubectl logs {{ $labels.pod }} -n vortex-inference --previous
+          kubectl logs {{ $labels.pod }} -n {{ $labels.namespace }} --previous
 
     # The fallback backend has been taking requests because the primary kept
     # failing and the circuit breaker is skipping it. Clients are still

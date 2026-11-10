@@ -1,0 +1,15 @@
+# Sealed Secrets controller v0.41.2 in kube-system, under its default name
+# so `kubeseal` finds it without flags. It decrypts with the key that
+# `make bootstrap-gitops` installs before this syncs (see
+# scripts/bootstrap-gitops.sh), which is why the SealedSecrets committed
+# under k8s/overlays/ open in every cluster built from this repository.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.41.2/controller.yaml
+
+images:
+- name: docker.io/bitnami/sealed-secrets-controller
+  newTag: 0.41.2
+  digest: sha256:e63ec6ec2b12a471bf781081bd370a93ca7b7b3999e5b9243341379aeb801d0b

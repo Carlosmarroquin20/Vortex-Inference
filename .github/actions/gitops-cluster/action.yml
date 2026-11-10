@@ -1,0 +1,56 @@
+name: GitOps cluster
+description: >-
+  Creates a single-node kind cluster on the runner and bootstraps it with
+  `make bootstrap-gitops` at a given commit, so Argo CD brings up the
+  platform and both environments from git exactly as it would anywhere
+  else. Returns once every Application is Synced and Healthy.
+
+inputs:
+  revision:
+    description: Commit SHA the cluster's Argo CD tracks.
+    required: true
+  sealed-secrets-key:
+    description: Private key that opens the committed SealedSecrets.
+    required: true
+  wait-timeout:
+    description: Seconds to wait for every Application to be healthy.
+    default: "900"
+
+runs:
+  using: composite
+  steps:
+    - name: Install kind
+      # Verified against the checksum published with the release before it
+      # is put on PATH.
+      shell: bash
+      env:
+        KIND_VERSION: v0.33.0
+        KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+      run: |
+        curl -fsSL -o "${RUNNER_TEMP}/kind" \
+          "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+        echo "${KIND_SHA256}  ${RUNNER_TEMP}/kind" | sha256sum --check --strict
+        sudo install -m 0755 "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+
+    - name: Create the cluster
+      # Kubernetes 1.35, the version kubeconform validates against and
+      # `make setup` runs; the node image is pinned by digest.
+      shell: bash
+      run: |
+        kind create cluster --name vortex --wait 120s \
+          --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+
+    - name: Cache the model
+      # Same key as the evaluation gate in ci.yml: one cached copy serves both.
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: models/qwen2.5-0.5b-instruct-q2_k.gguf
+        key: eval-model-9ee36184e616dfc76df4f5dd66f908dbde6979524ae36e6cefb67f532f798cb8
+
+    - name: Bootstrap GitOps
+      shell: bash
+      env:
+        GITOPS_REVISION: ${{ inputs.revision }}
+        SEALED_SECRETS_KEY: ${{ inputs.sealed-secrets-key }}
+        GITOPS_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+      run: make bootstrap-gitops

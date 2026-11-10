@@ -1,0 +1,40 @@
+# Argo CD itself. `make bootstrap-gitops` applies this once with kubectl;
+# from then on the argocd Application in gitops/apps syncs it from git like
+# everything else, so an Argo CD upgrade is a commit here.
+#
+# The upstream manifest is referenced by commit SHA (tag v3.5.7) rather than
+# by tag, and the images by digest: a moved tag cannot change what a cluster
+# installs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+resources:
+- namespace.yaml
+- https://raw.githubusercontent.com/argoproj/argo-cd/6d732962f61a99c2a0f221fd26b9aac7c83bcf18/manifests/install.yaml
+
+patches:
+- path: argocd-cm.yaml
+# No SSO and no notifications here: Dex and the notifications controller
+# would only take memory on a single-node cluster.
+- patch: |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: argocd-dex-server
+- patch: |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: argocd-notifications-controller
+
+images:
+- name: quay.io/argoproj/argocd
+  newTag: v3.5.7
+  digest: sha256:16df57da6f223808d204cd94c67c929b931fa01670b91b0b3a2298c4647de0db
+- name: public.ecr.aws/docker/library/redis
+  newTag: 8.2.3-alpine
+  digest: sha256:08ad0b1d280850169a790dba1393ff7a90aef951fc19632cf4d3ce4f78e679ba

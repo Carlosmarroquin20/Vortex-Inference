@@ -1,0 +1,29 @@
+# Staging: the first environment every image on main reaches. The release
+# workflow updates the image below with `kustomize edit set image` and
+# commits it; Argo CD applies the commit. Promotion to prod copies the same
+# tag and digest into ../prod once staging is healthy (ADR 0002).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vortex-staging
+
+resources:
+- ../../base
+- sealed-secrets.yaml
+
+components:
+- ../../components/gitops-environment
+
+labels:
+- pairs:
+    vortex.io/environment: staging
+  includeSelectors: false
+
+patches:
+- path: keda-autoscaler.yaml
+
+images:
+- name: vortex-inference
+  newName: ghcr.io/carlosmarroquin20/vortex-inference
+  newTag: sha-a95e3c4
+  digest: sha256:4bc896c418a1c1586259375c2d4e6bd5e893364d48557d7964b5a9d9e4615172

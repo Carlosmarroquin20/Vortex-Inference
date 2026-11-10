@@ -389,7 +389,7 @@ jobs:
           cosign verify "${IMAGE}@${DIGEST}" \
             --certificate-identity-regexp "${IDENTITY}" \
             --certificate-oidc-issuer "${ISSUER}" \
-            --output json | jq '.[0].optional | {Subject, Issuer, githubWorkflowRef, githubWorkflowSha}'
+            --output json | jq '.[0].critical'
 
       - name: Verify the SBOM attestation of the ${{ matrix.arch }} image
         run: |
@@ -418,3 +418,115 @@ jobs:
           docker run --rm "${IMAGE}@${DIGEST}" python -c "
           import platform, llama_cpp, app.main
           print(platform.machine(), llama_cpp.__version__)"
+
+  # ---------------------------------------------------------------------------
+  # Continuous delivery (ADR 0002). Main only. The verified image is written
+  # into the staging overlay as a commit, and the commit is the deployment:
+  # a cluster whose Argo CD tracks main must pick it up, sync it and pass the
+  # smoke test. Then the same tag and digest are committed to prod and
+  # checked the same way. There is no approval and no kubectl apply. Each
+  # environment changes only through a commit that Argo CD applies.
+  #
+  # No long-lived cluster sits behind this repository, so each job first
+  # brings up a kind cluster from main as it stands, with Argo CD tracking
+  # the branch. Only then does it push the promotion and watch Argo CD roll
+  # it out. Against a long-lived cluster, the same job would skip the
+  # bootstrap and wait on that cluster's Argo CD.
+  #
+  # Promotions are serialised across runs. A later run waits for an earlier
+  # one to finish prod before it touches staging.
+  # ---------------------------------------------------------------------------
+  staging:
+    name: Deploy to staging
+    needs: [plan, publish, verify]
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: staging
+    concurrency:
+      group: deploy-environments
+      cancel-in-progress: false
+    permissions:
+      contents: write # commit the promotion to main
+    outputs:
+      image: ${{ steps.promote.outputs.image }}
+    env:
+      IMAGE_REF: ${{ format('{0}:{1}@{2}', 'ghcr.io/carlosmarroquin20/vortex-inference', needs.publish.outputs.tag, needs.publish.outputs.digest) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tip of main, not the commit that triggered the run: other
+          # merges and promotions may have landed since.
+          ref: main
+
+      - uses: ./.github/actions/install-kustomize
+
+      - name: Bring up a cluster tracking main
+        uses: ./.github/actions/gitops-cluster
+        with:
+          revision: main
+          sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
+
+      - name: Commit the image to the staging overlay
+        id: promote
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          commit=$(bash scripts/promote.sh staging "${IMAGE_REF}")
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "Staging -> \`${IMAGE_REF}\` in ${commit}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Argo CD rolls out the commit
+        env:
+          COMMIT: ${{ steps.promote.outputs.commit }}
+        run: bash scripts/gitops-wait.sh 600 "${COMMIT}" vortex-staging
+
+      - name: Smoke test staging
+        run: bash scripts/smoke-test.sh vortex-staging "${IMAGE_REF}"
+
+  production:
+    name: Promote to prod
+    needs: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production
+    concurrency:
+      group: deploy-environments
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      IMAGE_REF: ${{ needs.staging.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - uses: ./.github/actions/install-kustomize
+
+      - name: Bring up a cluster tracking main
+        uses: ./.github/actions/gitops-cluster
+        with:
+          revision: main
+          sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
+
+      - name: Commit the staging image to the prod overlay
+        id: promote
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          commit=$(bash scripts/promote.sh prod "${IMAGE_REF}")
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "Prod -> \`${IMAGE_REF}\` in ${commit}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Argo CD rolls out the commit
+        env:
+          COMMIT: ${{ steps.promote.outputs.commit }}
+        run: bash scripts/gitops-wait.sh 600 "${COMMIT}" vortex-prod
+
+      - name: Smoke test prod
+        run: bash scripts/smoke-test.sh vortex-prod "${IMAGE_REF}"
+
+      - name: Argo CD reverts a manual change
+        run: bash scripts/drift-check.sh vortex-prod

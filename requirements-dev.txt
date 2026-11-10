@@ -22,5 +22,9 @@ fakeredis==2.39.0
 
 ruff==0.17.0
 
+# scripts/seal_secrets.py: the Sealed Secrets key pair and the sealed
+# environment credentials. PyYAML arrives with uvicorn[standard].
+cryptography==50.0.2
+
 # Dependency vulnerability audit, run in CI and on the weekly schedule.
 pip-audit==2.10.1

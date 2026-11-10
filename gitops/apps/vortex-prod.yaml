@@ -1,0 +1,32 @@
+# Prod. Receives the image staging verified, by a commit from the same
+# release run.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vortex-prod
+  namespace: argocd
+  labels:
+    vortex.io/source: this-repo
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Carlosmarroquin20/Vortex-Inference.git
+    targetRevision: main
+    path: k8s/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vortex-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

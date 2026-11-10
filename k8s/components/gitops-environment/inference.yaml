@@ -1,0 +1,21 @@
+# Sized for Qwen2.5-0.5B on one thread: about 450MB resident with the weights
+# memory-mapped, and well under a second per short completion. The limit
+# leaves room for the KV cache at the context below and for load spikes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vortex-inference
+  namespace: vortex-inference
+spec:
+  template:
+    spec:
+      containers:
+      - name: inference-server
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 250m
+            memory: 768Mi
+          limits:
+            cpu: "1"
+            memory: 1536Mi

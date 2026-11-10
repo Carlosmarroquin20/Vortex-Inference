@@ -1,0 +1,48 @@
+# One model volume per environment, both on the node directory that
+# `make bootstrap-gitops` copies the model into. A PersistentVolume binds to
+# a single claim, and both environments' claims have the same name and
+# selector, so claimRef reserves each volume for its environment; without it
+# the first claim to bind could take either.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vortex-model-staging
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: model-storage
+    type: model-storage
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+  - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: vortex-staging
+    name: vortex-model-pvc
+  hostPath:
+    path: /data/models
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vortex-model-prod
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: model-storage
+    type: model-storage
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+  - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: vortex-prod
+    name: vortex-model-pvc
+  hostPath:
+    path: /data/models
+    type: Directory

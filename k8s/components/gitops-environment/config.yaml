@@ -1,0 +1,17 @@
+# One thread per replica: these environments scale out with more replicas
+# rather than more threads, and a single thread keeps a replica's CPU use
+# inside its 1 CPU limit (see "Thread counts follow the CPU limit" in the
+# README). A 2048-token context bounds the KV cache to the memory limit.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vortex-inference-config
+  namespace: vortex-inference
+data:
+  VORTEX_MODEL_PATH: "/models/qwen2.5-0.5b-instruct-q2_k.gguf"
+  VORTEX_MODEL_NAME: "qwen2.5-0.5b-instruct-q2_k"
+  VORTEX_N_CTX: "2048"
+  VORTEX_N_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  VORTEX_INFERENCE_TIMEOUT_SECONDS: "60.0"

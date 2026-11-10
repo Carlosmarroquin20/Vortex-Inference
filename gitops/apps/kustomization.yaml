@@ -1,0 +1,25 @@
+# The root Application ("app of apps") syncs this directory. Each entry is a
+# child Application; their sync waves order the cluster's build-up:
+#
+#   -3  Argo CD, managing itself
+#   -2  controllers and their CRDs: Sealed Secrets, KEDA, Argo Rollouts,
+#       prometheus-operator and Prometheus
+#   -1  cluster-scoped objects the environments share
+#    0  the environments, staging and prod
+#
+# Children labelled vortex.io/source=this-repo read from this repository.
+# The root Application overrides their repoURL and targetRevision with its
+# own (see gitops/bootstrap/root-app.yaml), so a cluster bootstrapped from
+# a fork or from a given commit stays on that fork or commit throughout.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- argocd.yaml
+- sealed-secrets.yaml
+- keda.yaml
+- argo-rollouts.yaml
+- kube-prometheus-stack.yaml
+- cluster.yaml
+- vortex-staging.yaml
+- vortex-prod.yaml

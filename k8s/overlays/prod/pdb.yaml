@@ -1,0 +1,14 @@
+# Stricter than the base's maxUnavailable: 1. With a floor of three replicas,
+# minAvailable: 2 lets a drain evict one pod at a time, as before, but also
+# holds when KEDA has scaled out: four replicas still keep two available
+# instead of allowing one more eviction than prod has headroom for. The
+# base's reason for avoiding minAvailable, a single-replica deployment
+# that could never be drained, does not apply at three.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vortex-inference
+  namespace: vortex-inference
+spec:
+  maxUnavailable: null
+  minAvailable: 2
