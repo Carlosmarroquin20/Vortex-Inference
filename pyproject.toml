@@ -15,6 +15,9 @@ select = ["E", "W", "F", "I", "B", "UP", "S", "ASYNC", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # pytest's assertion rewriting is the point of using bare asserts in tests.
 "tests/**" = ["S101"]
+# Operator scripts that drive kubectl and bash by name, with arguments built
+# from their own constants and CLI options, never from untrusted input.
+"scripts/{canary_baseline,rollout_status}.py" = ["S603", "S607"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
