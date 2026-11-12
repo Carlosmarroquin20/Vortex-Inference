@@ -601,6 +601,72 @@ Secret.
   failing submissions, with runbooks in [docs/runbooks/](docs/runbooks/README.md),
   and an Asynchronous Jobs row in the Grafana dashboard.
 
+### Catalog enrichment
+
+A job type for product catalogs. It takes a messy title and description
+and turns them into a structured, validated record
+([ADR 0006](docs/adr/0006-catalog-enrichment-job.md)):
+
+```bash
+curl -s http://$IP/v1/jobs -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' -d '{
+  "url": "/v1/catalog/enrichments",
+  "body": {
+    "title": "**NEW** RIVET MID-CENTURY DINING CHAIR #A1B2C3D4",
+    "description": "<p>Made of walnut wood<br>Dimensions: 20.5 x 22.0 x 31.0 in</p>"
+  }
+}'
+# GET /v1/jobs/{id} once succeeded:
+# "result": {"object": "catalog.enrichment", "attempts": 1, "product": {
+#   "category": "chair", "brand": "Rivet", "material": "walnut wood",
+#   "dimensions": {"length": 20.5, "width": 22.0, "height": 31.0, "unit": "in"},
+#   "title": "Rivet Mid-Century Dining Chair"}}
+# "usage": {"prompt_tokens": 381, "completion_tokens": 85, "generation_seconds": 6.8}
+```
+
+- **Validated against a JSON Schema.** Every answer is checked against
+  [`app/catalog/product.schema.json`](app/catalog/product.schema.json). The
+  schema fixes the category taxonomy, positive dimensions with a unit, and
+  allows no extra fields. Nothing unvalidated is stored.
+- **Constrained while generating.** llama.cpp turns the schema into a
+  grammar, so the output can only take its shape. OpenAI-compatible backends
+  receive it as strict `response_format`. The validation still runs for
+  every backend.
+- **Retries and a dead-letter queue.**
+  - An answer that fails the schema is retried through the existing retry
+    queues, with the validation error added to the prompt.
+  - After `VORTEX_JOB_MAX_ATTEMPTS` the job fails and its message goes to
+    the dead-letter queue.
+  - `usage` adds up tokens and time across every attempt.
+- **Metrics:**
+  - `vortex_catalog_outputs_total{result}`, the share of valid answers;
+  - `vortex_catalog_products_total{outcome}`;
+  - `vortex_catalog_attempts`;
+  - `vortex_catalog_attempt_duration_seconds`;
+  - `vortex_catalog_tokens_total{type}`.
+
+**Measured on every build.** [`scripts/eval_catalog.py`](scripts/eval_catalog.py)
+runs in CI against the built image, with three workers, RabbitMQ and Redis.
+It submits 200 labelled products as jobs. They are public listings from
+[Amazon Berkeley Objects](https://amazon-berkeley-objects.s3.amazonaws.com/index.html),
+CC BY 4.0, built by [`scripts/build_catalog_dataset.py`](scripts/build_catalog_dataset.py).
+Results with Qwen2.5-0.5B Q2_K:
+
+| | Prompt only | Grammar-constrained |
+|---|---|---|
+| Valid records | 46% | **100%** |
+| Mean field accuracy | 29% | **62%** (category 76%, material 92%, dimensions 63%, brand 44%, title 35%) |
+| Generation time per product (p50) | 18.2 s | **6.8 s** |
+| Compute cost per product (1 vCPU at $0.0336/h) | $0.00016 | **$0.000064** |
+
+CI fails below 95% valid or 0.55 mean accuracy. The weak fields, brand and
+clean title, are where a larger model would gain most. The same evaluation
+measures it: change `VORTEX_MODEL_PATH` and re-run.
+
+Dataset attribution: Amazon Berkeley Objects, Collins et al., "ABO: Dataset
+and Benchmarks for Real-World 3D Object Understanding", CVPR 2022, licensed
+CC BY 4.0. The inputs are corrupted versions of the listings' text, and the
+labels are the listings' own fields.
+
 ## Evaluation
 
 `scripts/run_evals.py` runs a dataset of conversations against
@@ -957,6 +1023,7 @@ vortex-inference/
 │   ├── config.py             # Pydantic Settings — all tunables via env vars
 │   ├── logging_config.py     # logfmt formatter + request ID middleware
 │   ├── tracing.py            # OpenTelemetry setup, generation spans, AMQP propagation
+│   ├── catalog/              # Catalog enrichment: product JSON Schema, prompt, answer validation
 │   ├── jobs/                 # Asynchronous jobs: API, RabbitMQ topology, Redis store, processor
 │   └── backends/
 │       ├── __init__.py       # create_backend(): selects the engine from VORTEX_BACKEND
@@ -1021,7 +1088,9 @@ vortex-inference/
 │   ├── await-rollout.sh      # Follows a canary to 100% or fails on abort
 │   ├── rollout_status.py     # One-line canary status: step, pods, analysis values
 │   ├── demo-canary.sh        # Good release, bad release, git revert, end to end
-│   └── replay-log.sh         # Time-lapse replay of the demo transcript (VHS)
+│   ├── replay-log.sh         # Time-lapse replay of the demo transcript (VHS)
+│   ├── build_catalog_dataset.py # 200 labelled products from public ABO listings
+│   └── eval_catalog.py       # Catalog enrichment accuracy, validity and cost through the queue
 ├── requirements.txt          # Runtime dependencies (baked into the image)
 ├── requirements-dev.txt      # Test and lint tooling
 ├── pyproject.toml            # ruff, pytest and coverage configuration

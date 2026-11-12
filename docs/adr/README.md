@@ -12,3 +12,4 @@ acceptance; a later decision supersedes an earlier one in a new record.
 | [0003](0003-canary-releases-with-argo-rollouts.md) | Canary releases with Argo Rollouts and Prometheus analysis |
 | [0004](0004-end-to-end-test-on-ephemeral-clusters.md) | End-to-end test on an ephemeral kind cluster, through git |
 | [0005](0005-rollback-by-git-revert.md) | Roll back by reverting the release commit |
+| [0006](0006-catalog-enrichment-job.md) | Catalog enrichment as a queued job, schema-validated and grammar-constrained |
