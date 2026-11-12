@@ -192,7 +192,7 @@ jobs:
   docker-build:
     name: Build Docker Image
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -279,6 +279,60 @@ jobs:
         with:
           name: eval-report
           path: eval-report.json
+          if-no-files-found: ignore
+
+      # Catalog enrichment, end to end through the queue (ADR 0006): the same
+      # image as an API and three workers, RabbitMQ and Redis from the
+      # integration compose file. Every row of evals/datasets/catalog.jsonl
+      # (200 public ABO listings, labelled) is submitted as a job; the report
+      # has the share of valid records, per-field accuracy against the
+      # labels, attempts, time, tokens and estimated cost per product. The
+      # gate sits a little below the recorded baseline in evals/baselines/.
+      - name: Start RabbitMQ and Redis
+        run: |
+          docker rm -f vortex-eval
+          docker compose -f tests/integration/compose.yaml up -d --wait
+
+      - name: Run the catalog enrichment evaluation
+        run: |
+          common=(
+            --network host
+            -v "${PWD}/models:/models:ro"
+            -e VORTEX_MODEL_PATH=/models/qwen2.5-0.5b-instruct-q2_k.gguf
+            -e VORTEX_MODEL_NAME=qwen2.5-0.5b-instruct-q2_k
+            -e VORTEX_N_CTX=2048
+            -e VORTEX_JOBS_ENABLED=true
+            -e VORTEX_RABBITMQ_URL=amqp://vortex:integration-only@127.0.0.1:5673/
+            -e VORTEX_REDIS_URL=redis://:integration-only@127.0.0.1:6380/0
+            -e VORTEX_JOB_RETRY_DELAY_SECONDS=2
+            -e VORTEX_N_THREADS=1 -e OMP_NUM_THREADS=1 -e OPENBLAS_NUM_THREADS=1
+          )
+          image="vortex-inference:ci-${{ github.sha }}"
+          docker run -d --name catalog-api --cpus 1 "${common[@]}" "${image}"
+          for i in 1 2 3; do
+            docker run -d --name "catalog-worker-${i}" --cpus 1 "${common[@]}" \
+              -e "VORTEX_WORKER_METRICS_PORT=909${i}" "${image}" python -m app.worker
+          done
+          for _ in $(seq 120); do
+            curl -sf http://127.0.0.1:8080/health/ready > /dev/null && break
+            sleep 1
+          done
+          python3 scripts/eval_catalog.py --url http://127.0.0.1:8080 \
+            --dataset evals/datasets/catalog.jsonl --concurrency 8 \
+            --cpus-per-worker 1 --json catalog-report.json
+
+      - name: Catalog service logs
+        if: failure()
+        run: |
+          docker logs --tail 100 catalog-api
+          docker logs --tail 100 catalog-worker-1
+
+      - name: Upload the catalog evaluation report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalog-report
+          path: catalog-report.json
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
