@@ -109,6 +109,8 @@ the cluster to git again.
 
 Locally (`make deploy`, no Argo CD), `kubectl rollout undo
 deployment/vortex-inference -n vortex-inference` remains the rollback.
+The alternatives that were rejected are in
+[ADR 0005](docs/adr/0005-rollback-by-git-revert.md).
 
 ---
 
