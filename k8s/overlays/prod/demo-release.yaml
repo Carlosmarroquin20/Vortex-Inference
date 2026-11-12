@@ -2,4 +2,9 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: RELEASE_ID
-    value: "good"
+    value: "bad"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: VORTEX_FAULT_RATE
+    value: "0.5"
