@@ -1,7 +1,7 @@
 # VHS tape for the canary GIF at the top of the README.
 #
 # CI renders it after scripts/demo-canary.sh has run against a real cluster
-# (the GitOps job in .github/workflows/ci.yml), by replaying that run's
+# (.github/workflows/e2e-gitops.yml), by replaying that run's
 # transcript as a time-lapse with scripts/replay-log.sh. The first line of
 # the recording states the speed-up.
 #

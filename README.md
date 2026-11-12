@@ -1,5 +1,9 @@
 # Vortex Inference
 
+[![CI](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/ci.yml)
+[![Release](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/release.yml)
+[![E2E GitOps](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/e2e-gitops.yml/badge.svg?branch=main)](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/e2e-gitops.yml)
+
 A production-grade MLOps platform for serving specialized Small Language Models (SLMs) on Kubernetes. Designed to demonstrate high-availability inference patterns in resource-constrained environments using event-driven autoscaling, native observability, and GGUF quantization.
 
 ![Canary demonstration: a good release reaches 100%, a release failing half its requests is aborted by the analysis, git revert restores the environment](docs/demo/canary.gif)
@@ -780,9 +784,42 @@ a branch that the cluster tracks:
 3. A `git revert` of the previous commit. It has to bring the Rollout back to
    Healthy.
 
-CI runs the demo on every pull request and fails if any step ends
-differently. The GIF at the top of this README is that run, replayed as a
-time-lapse.
+CI runs the demo and fails if any step ends differently (see the next
+section). The GIF at the top of this README is one of those runs, replayed as
+a time-lapse.
+
+### End-to-end test on a real cluster
+
+[![E2E GitOps](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/e2e-gitops.yml/badge.svg?branch=main)](https://github.com/Carlosmarroquin20/Vortex-Inference/actions/workflows/e2e-gitops.yml)
+
+[`e2e-gitops.yml`](.github/workflows/e2e-gitops.yml) runs on every push to
+`main`, on demand, and on every pull request (from `ci.yml`). Each run starts
+from an empty runner:
+
+1. It creates a kind cluster with Kubernetes 1.35.
+2. `make bootstrap-gitops` installs Argo CD. Argo CD then installs everything
+   else declared in git through the app of apps: itself, Sealed Secrets,
+   KEDA, Argo Rollouts, Prometheus, and the staging and prod environments.
+   Every Application must reach Synced and Healthy.
+3. It smoke-tests both environments against the image their overlay pins.
+4. It changes prod by hand, and Argo CD has to revert the change.
+5. It runs `scripts/demo-canary.sh` on prod. The good release has to reach
+   100%, the bad one has to be aborted while the stable revision keeps
+   serving, and the revert has to end Healthy. Any other outcome fails the
+   run.
+6. It records the demo with VHS.
+
+Each run uploads these artifacts:
+
+- the GIF and the timestamped transcript;
+- the Rollout, together with every AnalysisRun and its measurements (also
+  as a one-line-per-run summary);
+- the Kubernetes events;
+- the final state of every Argo CD Application.
+
+Run it by hand from the Actions tab. The `measure-baseline` option measures
+the canary baseline again instead of running the demo, for example after
+changing the model or the load.
 
 ---
 

@@ -62,10 +62,24 @@ while :; do
   if [ "${SECONDS}" -ge "${deadline}" ]; then
     echo "[gitops-wait] timed out after ${timeout}s; still pending: ${pending[*]}" >&2
     kubectl get applications.argoproj.io -n "${ns}" -o wide >&2 || true
-    for app in $(list_apps); do
-      kubectl get applications.argoproj.io -n "${ns}" "${app}" \
-        -o jsonpath='{.metadata.name}{": "}{.status.conditions}{"\n"}{range .status.resources[?(@.health.status!="Healthy")]}{"  "}{.kind}{"/"}{.name}{" "}{.health.status}{" "}{.health.message}{"\n"}{end}' >&2 || true
-    done
+    # Every resource that is not Healthy, with Argo CD's reason, for each
+    # Application that is not (resource health is persisted in the status,
+    # see gitops/bootstrap/argocd/argocd-cmd-params-cm.yaml).
+    kubectl get applications.argoproj.io -n "${ns}" -o json | python3 -c '
+import json, sys
+for app in json.load(sys.stdin)["items"]:
+    status = app.get("status", {})
+    if status.get("health", {}).get("status") == "Healthy":
+        continue
+    print(app["metadata"]["name"] + ":", status.get("health", {}))
+    for condition in status.get("conditions", []):
+        print("  condition", condition.get("type"), condition.get("message"))
+    for resource in status.get("resources", []):
+        health = resource.get("health")
+        if health and health.get("status") != "Healthy":
+            where = resource.get("namespace", "") + "/" + resource["name"]
+            print("  ", resource["kind"], where, health.get("status"), health.get("message", ""))
+' >&2 || true
     kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -40 >&2 || true
     exit 1
   fi

@@ -1,0 +1,170 @@
+name: E2E GitOps
+
+# End to end on a real cluster, from nothing (ADR 0002, ADR 0003):
+#
+#   1. kind on the runner, Kubernetes 1.35;
+#   2. `make bootstrap-gitops`: Argo CD, then everything else declared in git
+#      through the app of apps: Argo CD itself, Sealed Secrets, KEDA, Argo
+#      Rollouts, Prometheus, and the staging and prod environments, each
+#      required Synced and Healthy;
+#   3. both environments smoke-tested against the image their overlay pins;
+#   4. a manual change to prod reverted by Argo CD (drift);
+#   5. scripts/demo-canary.sh on prod: a good release must reach 100%, a
+#      release with VORTEX_FAULT_RATE=0.5 must be aborted by the analysis,
+#      and git revert must bring the Rollout back to Healthy;
+#   6. the run recorded with VHS.
+#
+# Artifacts: the GIF and the demo transcript, the Rollout and every
+# AnalysisRun with its measurements, Kubernetes events, and the state of
+# every Argo CD Application.
+#
+# Runs on every push to main, on demand, and from ci.yml for pull requests.
+# The demonstration commits through git like any release, so the cluster
+# tracks a throwaway branch created at the commit under test and deleted
+# afterwards; pushes made with the workflow token trigger no workflows.
+#
+# If the AnalysisTemplate has no thresholds yet, or measure-baseline is set,
+# the run measures the baseline they are derived from instead of the
+# demonstration (scripts/canary_baseline.py).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      measure-baseline:
+        description: Measure the canary baseline instead of running the demonstration
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to test
+        type: string
+        required: true
+    secrets:
+      SEALED_SECRETS_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-gitops-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e:
+    name: Kind, Argo CD and canary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write # the throwaway branch the demonstration commits to
+    env:
+      DEMO_BRANCH: e2e/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: ./.github/actions/install-kustomize
+
+      - name: Create the branch the cluster tracks
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push --quiet origin "HEAD:refs/heads/${DEMO_BRANCH}"
+
+      - name: Bring up the cluster from that branch
+        uses: ./.github/actions/gitops-cluster
+        with:
+          revision: ${{ env.DEMO_BRANCH }}
+          sealed-secrets-key: ${{ secrets.SEALED_SECRETS_KEY }}
+
+      - name: Platform components are running
+        # Already implied by every Application being Healthy; named here so
+        # a failure says which component is missing.
+        run: |
+          kubectl rollout status -n argocd statefulset/argocd-application-controller --timeout=60s
+          kubectl rollout status -n argo-rollouts deployment/argo-rollouts --timeout=60s
+          kubectl rollout status -n keda deployment/keda-operator --timeout=60s
+          kubectl rollout status -n kube-system deployment/sealed-secrets-controller --timeout=60s
+          kubectl rollout status -n monitoring statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=60s
+
+      - name: Smoke test both environments
+        run: |
+          for environment in staging prod; do
+            image=$(yq '.images[0] | .newName + ":" + .newTag + "@" + .digest' \
+              "k8s/overlays/${environment}/kustomization.yaml")
+            bash scripts/smoke-test.sh "vortex-${environment}" "${image}"
+          done
+
+      - name: Argo CD reverts a manual change
+        run: bash scripts/drift-check.sh vortex-prod
+
+      - name: Choose between baseline and demonstration
+        id: mode
+        env:
+          MEASURE: ${{ inputs.measure-baseline }}
+        run: |
+          if [ "${MEASURE}" = "true" ] \
+            || grep -q 'value: "MIN_REQUESTS"' k8s/components/gitops-environment/analysis-template.yaml; then
+            echo "baseline=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "baseline=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.mode.outputs.baseline == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Measure the canary baseline
+        if: steps.mode.outputs.baseline == 'true'
+        run: |
+          pip install --quiet pyyaml==6.0.3
+          python3 scripts/canary_baseline.py --namespace vortex-prod --json canary-baseline.json
+
+      - name: Canary demonstration
+        # Fails unless the good release reaches 100%, the bad one is aborted
+        # with the stable revision untouched, and the revert ends Healthy.
+        if: steps.mode.outputs.baseline == 'false'
+        env:
+          DEMO_LOG: demo-canary.log
+        run: bash scripts/demo-canary.sh
+
+      - name: Record the demonstration (VHS)
+        if: steps.mode.outputs.baseline == 'false'
+        run: |
+          docker run --rm -v "${PWD}:/vhs" \
+            ghcr.io/charmbracelet/vhs:v0.12.1@sha256:ea49a6a1c529be83153e88321892b5585964418f0b9055e8c1e0d732194234a3 \
+            docs/demo/canary.tape
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          mkdir -p evidence
+          cp demo-canary.log canary-baseline.json docs/demo/canary.gif evidence/ 2>/dev/null || true
+          kubectl get rollout -n vortex-prod -o yaml > evidence/prod-rollout.yaml 2>/dev/null || true
+          kubectl get analysisruns -n vortex-prod -o yaml > evidence/prod-analysisruns.yaml 2>/dev/null || true
+          kubectl get analysisruns -n vortex-prod -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .status.metricResults[*]}{.name}={.phase}:{.measurements[-1].value}{" "}{end}{"\n"}{end}' \
+            > evidence/prod-analysis-summary.tsv 2>/dev/null || true
+          kubectl get events -n vortex-prod --sort-by=.lastTimestamp > evidence/prod-events.txt 2>/dev/null || true
+          kubectl get applications.argoproj.io -n argocd -o wide > evidence/applications.txt 2>/dev/null || true
+          kubectl get applications.argoproj.io -n argocd -o json > evidence/applications.json 2>/dev/null || true
+          for ns in vortex-staging vortex-prod; do
+            kubectl get rollout,deployment,statefulset,scaledobject,pdb,pvc,sealedsecret,pods \
+              -n "${ns}" -o wide > "evidence/${ns}-objects.txt" 2>&1 || true
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: e2e-gitops
+          path: evidence/
+          if-no-files-found: ignore
+
+      - name: Delete the throwaway branch
+        if: always()
+        run: git push --quiet origin --delete "${DEMO_BRANCH}" || true
