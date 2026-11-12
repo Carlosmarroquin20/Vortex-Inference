@@ -25,7 +25,7 @@ patches:
 - path: pdb.yaml
 
 images:
-- digest: sha256:0967337aca0084b4066fa2de931ff2abe26e45463f4ccb4c961c0a188ede92c0
+- digest: sha256:efa27e82e175e0b2d64f871740532669e057cb66c9517a89b11495c99d0c03a5
   name: vortex-inference
   newName: ghcr.io/carlosmarroquin20/vortex-inference
-  newTag: sha-4a8018b
+  newTag: sha-b47e9ea
