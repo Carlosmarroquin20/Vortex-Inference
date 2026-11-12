@@ -94,8 +94,9 @@
     "tpot_seconds": null
   },
   "thresholds": {
-    "min-requests": 44,
-    "max-error-rate": 0.023,
+    "min-requests": 33,
+    "max-error-rate": 0.03,
     "max-p95-seconds": 2.0
-  }
+  },
+  "thresholds_derivation": "recomputed 2026-11-12 from the same windows: the canary share is the window total over ready pods + 1 (maxSurge), not over ready pods"
 }

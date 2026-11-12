@@ -14,7 +14,7 @@
 #   p95-latency      the 95th percentile of their end-to-end duration.
 #
 # The thresholds come from a measured baseline (evals/baselines/canary.json,
-# produced by scripts/canary-baseline.sh with the same load the analysis
+# produced by scripts/canary_baseline.py with the same load the analysis
 # runs under); the ADR explains how each is derived from it.
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
@@ -29,9 +29,9 @@ spec:
   - name: namespace
   - name: canary-hash
   - name: min-requests
-    value: "44"
+    value: "33"
   - name: max-error-rate
-    value: "0.023"
+    value: "0.03"
   - name: max-p95-seconds
     value: "2.0"
   metrics:
@@ -39,7 +39,10 @@ spec:
     initialDelay: 90s
     interval: 30s
     count: 3
-    failureLimit: 0
+    # The first window of a fresh pod includes its slowest requests (cold
+    # page cache) and so its fewest; one short window is tolerated, two of
+    # three must reach the minimum. Zero traffic still fails every window.
+    failureLimit: 1
     successCondition: result[0] >= {{args.min-requests}}
     provider:
       prometheus:

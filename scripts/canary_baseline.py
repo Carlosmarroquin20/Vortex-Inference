@@ -10,10 +10,12 @@ be: same metrics, same 90s window, same load.
 
 Thresholds (ADR 0003):
 
-  min-requests     half the completions one pod receives per window at its
-                   quietest. Per pod, because a canary starts as one pod;
-                   halved, because kube-proxy does not split traffic evenly
-                   over short windows.
+  min-requests     half the completions the canary's one pod would receive
+                   in the quietest window. While the canary runs, the
+                   Service has one pod more than the baseline (maxSurge: 1),
+                   so that share is the window's total over ready pods + 1;
+                   halved, because kube-proxy does not split short windows
+                   evenly and a fresh pod is slower on its first requests.
   max-error-rate   twice the worst window's 5xx rate, but never below one
                    failed request in a minimum-volume window: a healthy
                    baseline with zero errors would otherwise yield a
@@ -84,7 +86,8 @@ def instant(query: str) -> float | None:
 
 
 def derive(windows: list[dict], pods: int) -> dict:
-    per_pod = [w["request-volume"] / pods for w in windows]
+    # The canary pod is one of pods + 1 behind the Service (maxSurge: 1).
+    per_pod = [w["request-volume"] / (pods + 1) for w in windows]
     min_requests = max(1, math.floor(min(per_pod) / 2))
     worst_errors = max(w["error-rate"] or 0.0 for w in windows)
     max_error_rate = max(2 * worst_errors, 1 / min_requests)

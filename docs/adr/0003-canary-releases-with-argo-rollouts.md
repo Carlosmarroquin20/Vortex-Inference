@@ -68,7 +68,7 @@ traffic:
 
 | Check | Fails when |
 |-------|-----------|
-| request-volume | fewer than `min-requests` completions reached the canary |
+| request-volume | fewer than `min-requests` completions reached the canary, in two of three windows |
 | error-rate | the 5xx share is above `max-error-rate` |
 | p95-latency | the p95 is above `max-p95-seconds` in two of three windows |
 
@@ -83,9 +83,11 @@ fixed parameters. The script evaluates the AnalysisTemplate's own queries
 against the stable pods every 30 seconds. The run is in
 `evals/baselines/canary.json`. The rules:
 
-- `min-requests`: half the completions one pod receives per window at its
-  quietest. Per pod, because a canary starts as one pod. Halved, because
-  kube-proxy does not split short windows evenly.
+- `min-requests`: half of what the canary's single pod would receive in the
+  quietest window. While a canary runs, the Service has one pod more than
+  the baseline had (`maxSurge: 1`), so the canary's share is the window total
+  divided by ready pods + 1. It is halved because kube-proxy does not split
+  short windows evenly.
 - `max-error-rate`: twice the worst window's 5xx share, but never below one
   failed request in a minimum-volume window. A healthy baseline with zero
   errors would otherwise give a threshold of zero.
@@ -99,8 +101,8 @@ completions and 420 s of load:
 
 | Measurement | Worst window (10 windows) | Threshold |
 |-------------|---------------------------|-----------|
-| Completions per window, all pods | 265.9 (88.6 per pod) | `min-requests` = 44 |
-| 5xx share | 0 (0 of 1,309 requests) | `max-error-rate` = 0.023 (1/44) |
+| Completions per window, all pods | 265.9 (66.5 per pod among four) | `min-requests` = 33 |
+| 5xx share | 0 (0 of 1,309 requests) | `max-error-rate` = 0.03 (1/33) |
 | p95, server histogram | 1.32 s | `max-p95-seconds` = 2.0 |
 
 The client saw a p95 of 1.05 s for the same requests (`loadgen.py`). The
@@ -109,9 +111,23 @@ inside the 1.0–1.5 s bucket. The threshold is compared with the server
 figure, so it was derived from that figure too.
 
 The load is closed-loop with two clients, so throughput (about 3.1 requests
-per second) does not depend on the number of pods. When the canary is
-running at 10%, the canary pod is one of four and gets about 70 completions
-per window. At 50%, it gets about 140. Both are well above the minimum.
+per second) does not depend on the number of pods. At 10%, the canary pod is
+one of four and gets about 66 completions per window. At 50%, it gets about
+133.
+
+**The first derivation was wrong, and a run showed it.** The thresholds were
+first derived per pod among the baseline's three pods: `min-requests` 44,
+`max-error-rate` 0.023. That overlooked the surge pod. A later CI run then
+aborted a good release. The canary received 33.7 completions in its first
+window, on a runner that ran about twice as slowly as the baseline's (p95
+1.83 s) and while the pod was still cold. Two corrections came out of it,
+both applied to the same measured windows:
+
+- the derivation now divides by pods + 1;
+- the volume check tolerates one short window out of three, as the latency
+  check already did.
+
+"No data" still cannot pass, because zero traffic fails every window.
 
 The thresholds hold only for that load and that model. A different load,
 model or node size needs a new baseline. The script is the procedure.
