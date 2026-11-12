@@ -94,7 +94,7 @@ spec:
         # Applied only when the data directory is empty, i.e. on the first
         # boot. Rotating the password later is done in the broker
         # (rabbitmqctl change_password) and then in the Secret; see
-        # docs/runbooks.md.
+        # docs/runbooks/README.md.
         env:
         - name: RABBITMQ_DEFAULT_USER
           valueFrom:
