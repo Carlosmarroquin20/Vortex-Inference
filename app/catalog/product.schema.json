@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Carlosmarroquin20/Vortex-Inference/app/catalog/product.schema.json",
+  "title": "Enriched product",
+  "description": "Structured attributes extracted from a product's title and description.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "brand", "material", "dimensions", "title"],
+  "properties": {
+    "category": {
+      "description": "The product type, from the catalog's taxonomy.",
+      "enum": ["chair", "sofa", "rug", "table", "lamp", "bed", "ottoman", "planter", "pillow", "mirror"]
+    },
+    "brand": {
+      "description": "The brand as written on the product, without the retailer's prefix.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "material": {
+      "description": "The main material.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "dimensions": {
+      "description": "Length, width and height in the unit the listing states.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["length", "width", "height", "unit"],
+      "properties": {
+        "length": {"type": "number", "exclusiveMinimum": 0},
+        "width": {"type": "number", "exclusiveMinimum": 0},
+        "height": {"type": "number", "exclusiveMinimum": 0},
+        "unit": {"enum": ["in", "cm", "mm", "m", "ft"]}
+      }
+    },
+    "title": {
+      "description": "A clean product name: brand and key attributes, no codes, promotions or shouting.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 200
+    }
+  }
+}

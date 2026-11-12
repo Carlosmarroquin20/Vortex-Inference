@@ -77,7 +77,8 @@ async def submit_job(
     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
 ) -> Job:
     """
-    Queues a completion or chat completion to be run by a worker.
+    Queues a completion, a chat completion or a catalog enrichment to be
+    run by a worker.
 
     With an Idempotency-Key header, repeating a submission (for example
     after a timeout) returns the job the first one created, with status

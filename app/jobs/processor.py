@@ -25,7 +25,7 @@ from typing import Literal, Protocol
 
 from pydantic import ValidationError
 
-from app import tracing
+from app import catalog, tracing
 from app.backends import BackendError, InferenceBackend
 from app.completions import (
     Failure,
@@ -36,9 +36,14 @@ from app.completions import (
     completion_response,
     timeout_detail,
 )
-from app.jobs.models import Job, JobError, JobMessage
+from app.jobs.models import CATALOG_URL, Job, JobError, JobMessage, JobUsage
 from app.jobs.store import JobStore, JobStoreUnavailable
 from app.metrics import (
+    CATALOG_ATTEMPT_DURATION_SECONDS,
+    CATALOG_ATTEMPTS,
+    CATALOG_OUTPUTS_TOTAL,
+    CATALOG_PRODUCTS_TOTAL,
+    CATALOG_TOKENS_TOTAL,
     TOKENS_GENERATED_TOTAL,
     WORKER_JOB_DURATION_SECONDS,
     WORKER_JOB_WAIT_SECONDS,
@@ -249,7 +254,7 @@ class JobProcessor:
             return Decision("ack", "failed")
 
         try:
-            generation = self._generation(message)
+            generation = self._generation(message, job)
         except ValidationError as exc:
             # The API validated this body when it was submitted; a worker
             # running a newer version can still disagree, and it would on
@@ -302,6 +307,8 @@ class JobProcessor:
                 finish_reason=done.result["finish_reason"],
                 response_model=done.result.get("model"),
             )
+            if message.url == CATALOG_URL:
+                return await self._enriched(job, message, done)
             return await self._succeed(job, message, done)
 
         tracing.end_generation_span(
@@ -333,12 +340,121 @@ class JobProcessor:
         )
         return Decision("ack", "failed")
 
-    def _generation(self, message: JobMessage) -> Generation:
+    def _generation(self, message: JobMessage, job: Job) -> Generation:
         if message.url == "/v1/completions":
             return Generation.for_completion(
                 CompletionRequest.model_validate(message.body)
             )
+        if message.url == CATALOG_URL:
+            request = catalog.CatalogEnrichmentRequest.model_validate(message.body)
+            # The previous attempt's rejection, if that is why this is a
+            # retry; a retry after a backend failure gets the plain prompt.
+            previous = (
+                job.error.message
+                if job.error and job.error.status_code == catalog.INVALID_OUTPUT_STATUS
+                else None
+            )
+            # Greedy decoding: extraction has one right answer, and a
+            # sampled one would make the quality figures irreproducible.
+            return Generation(
+                prompt=catalog.messages(request, previous),
+                max_tokens=request.max_tokens,
+                temperature=0.0,
+                top_p=1.0,
+                stop=None,
+            )
         return Generation.for_chat(ChatCompletionRequest.model_validate(message.body))
+
+    async def _enriched(
+        self, job: Job, message: JobMessage, done: Finished
+    ) -> Decision:
+        """Validates an enrichment answer, then stores, retries or dead-letters it."""
+        result = done.result
+        spent = job.usage or JobUsage()
+        usage = JobUsage(
+            prompt_tokens=spent.prompt_tokens + result["tokens_prompt"],
+            completion_tokens=spent.completion_tokens + result["tokens_completion"],
+            generation_seconds=round(spent.generation_seconds + done.duration, 3),
+        )
+        CATALOG_TOKENS_TOTAL.labels(type="prompt").inc(result["tokens_prompt"])
+        CATALOG_TOKENS_TOTAL.labels(type="completion").inc(result["tokens_completion"])
+        TOKENS_GENERATED_TOTAL.labels(type="prompt").inc(result["tokens_prompt"])
+        TOKENS_GENERATED_TOTAL.labels(type="completion").inc(
+            result["tokens_completion"]
+        )
+
+        try:
+            product = catalog.parse(result["text"])
+        except catalog.InvalidOutput as exc:
+            CATALOG_OUTPUTS_TOTAL.labels(result="invalid").inc()
+            CATALOG_ATTEMPT_DURATION_SECONDS.labels(result="invalid").observe(
+                done.duration
+            )
+            error = JobError(
+                status_code=catalog.INVALID_OUTPUT_STATUS,
+                message=f"The answer did not match the product schema: {exc}",
+            )
+            if job.attempts < self._max_attempts:
+                await self._store.save(
+                    job.model_copy(
+                        update={"status": "queued", "error": error, "usage": usage}
+                    )
+                )
+                WORKER_JOB_DURATION_SECONDS.labels(outcome="retried").observe(
+                    done.duration
+                )
+                logger.warning(
+                    "Enrichment answer rejected by the schema. Retrying.",
+                    extra={"attempt": job.attempts, "reason": str(exc)[:300]},
+                )
+                return Decision(
+                    "retry", "retried", retry_attempt=job.attempts, message=message
+                )
+            # Out of attempts: the job fails and the message goes to the
+            # dead-letter queue, where the products the model cannot handle
+            # collect for inspection (then a prompt or model change, and a
+            # resubmission).
+            await self._finish_failed(job.model_copy(update={"usage": usage}), error)
+            CATALOG_PRODUCTS_TOTAL.labels(outcome="failed").inc()
+            CATALOG_ATTEMPTS.observe(job.attempts)
+            WORKER_JOB_DURATION_SECONDS.labels(outcome="failed").observe(done.duration)
+            logger.error(
+                "No valid enrichment after every attempt. Dead-lettering it.",
+                extra={"attempts": job.attempts, "reason": str(exc)[:300]},
+            )
+            return Decision("reject", "failed", message=message)
+
+        CATALOG_OUTPUTS_TOTAL.labels(result="valid").inc()
+        CATALOG_ATTEMPT_DURATION_SECONDS.labels(result="valid").observe(done.duration)
+        CATALOG_PRODUCTS_TOTAL.labels(outcome="enriched").inc()
+        CATALOG_ATTEMPTS.observe(job.attempts)
+        await self._store.save(
+            job.model_copy(
+                update={
+                    "status": "succeeded",
+                    "finished_at": _now(),
+                    "error": None,
+                    "usage": usage,
+                    "result": {
+                        "object": "catalog.enrichment",
+                        "model": result.get("model", self._model),
+                        "product": product,
+                        "attempts": job.attempts,
+                    },
+                }
+            )
+        )
+        WORKER_JOB_DURATION_SECONDS.labels(outcome="succeeded").observe(done.duration)
+        logger.info(
+            "Product enriched.",
+            extra={
+                "attempt": job.attempts,
+                "tokens_prompt": usage.prompt_tokens,
+                "tokens_completion": usage.completion_tokens,
+                "generation_seconds": usage.generation_seconds,
+            },
+        )
+        return Decision("ack", "succeeded")
 
     async def _succeed(self, job: Job, message: JobMessage, done: Finished) -> Decision:
         # The job ID's random part doubles as the completion ID, so a result

@@ -21,6 +21,9 @@ starlette==1.8.0
 pydantic==2.14.1
 pydantic-settings==2.15.0
 
+# Validates catalog enrichment answers against app/catalog/product.schema.json.
+jsonschema==4.26.0
+
 # Prometheus instrumentation
 # prometheus-client is the reference implementation — no dependencies, stable API.
 prometheus-client==0.26.0

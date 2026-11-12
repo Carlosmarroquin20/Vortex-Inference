@@ -13,10 +13,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.catalog import CatalogEnrichmentRequest
 from app.schemas import ChatCompletionRequest, CompletionRequest
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
-JobUrl = Literal["/v1/completions", "/v1/chat/completions"]
+JobUrl = Literal["/v1/completions", "/v1/chat/completions", "/v1/catalog/enrichments"]
+CATALOG_URL = "/v1/catalog/enrichments"
 
 # 128 random bits: IDs cannot be guessed or enumerated, which matters because
 # every holder of the API key can read any job whose ID they know.
@@ -52,8 +54,19 @@ class ChatCompletionJobSubmission(_NoStreaming):
     model_config = {"extra": "forbid"}
 
 
+class CatalogEnrichmentJobSubmission(BaseModel):
+    # Asynchronous only: there is no synchronous endpoint at this URL. It
+    # names the job type the way the other URLs do (app/catalog).
+    url: Literal["/v1/catalog/enrichments"]
+    body: CatalogEnrichmentRequest
+
+    model_config = {"extra": "forbid"}
+
+
 JobSubmission = Annotated[
-    CompletionJobSubmission | ChatCompletionJobSubmission,
+    CompletionJobSubmission
+    | ChatCompletionJobSubmission
+    | CatalogEnrichmentJobSubmission,
     Field(discriminator="url"),
 ]
 
@@ -63,6 +76,15 @@ class JobError(BaseModel):
     # with, so clients handle a failed job like a failed request.
     status_code: int
     message: str
+
+
+class JobUsage(BaseModel):
+    # Summed over every attempt, rejected ones included: what the job cost,
+    # not just what its final answer cost. Kept for catalog enrichments,
+    # whose attempts are retried on invalid answers.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    generation_seconds: float = 0.0
 
 
 class Job(BaseModel):
@@ -78,11 +100,12 @@ class Job(BaseModel):
     # Attempts started so far; above 1 means a retry.
     attempts: int = 0
     # The endpoint's response body (a text_completion or chat.completion
-    # object) once the job has succeeded.
+    # object, or a catalog.enrichment record) once the job has succeeded.
     result: dict[str, Any] | None = None
     # Why the job failed or, while it is queued for a retry, why its last
     # attempt did.
     error: JobError | None = None
+    usage: JobUsage | None = None
 
 
 class JobMessage(BaseModel):

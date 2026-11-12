@@ -68,10 +68,26 @@ def test_chat_submission(client, jobs):
     assert jobs.queue.messages[-1].body == CHAT_JOB["body"]
 
 
+def test_catalog_enrichment_submission(client, jobs):
+    payload = {
+        "url": "/v1/catalog/enrichments",
+        "body": {"title": "RIVET CHAIR #A1B2", "description": "Material: Wood"},
+    }
+
+    response = submit(client, payload)
+
+    assert response.status_code == 202
+    assert response.json()["url"] == "/v1/catalog/enrichments"
+    assert jobs.queue.messages[-1].url == "/v1/catalog/enrichments"
+    assert jobs.queue.messages[-1].body == payload["body"]
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         {"url": "/v1/embeddings", "body": {"input": "x"}},
+        {"url": "/v1/catalog/enrichments", "body": {"title": ""}},
+        {"url": "/v1/catalog/enrichments", "body": {"title": "x", "max_tokens": 10}},
         {"url": "/v1/completions", "body": {"prompt": ""}},
         {"url": "/v1/completions", "body": {"prompt": "hi", "stream": True}},
         {"url": "/v1/chat/completions", "body": {"messages": []}},
@@ -80,6 +96,8 @@ def test_chat_submission(client, jobs):
     ],
     ids=[
         "unknown-endpoint",
+        "catalog-empty-title",
+        "catalog-max-tokens-too-low",
         "invalid-body",
         "streaming",
         "invalid-chat-body",
