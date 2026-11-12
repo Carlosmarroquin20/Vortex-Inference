@@ -145,6 +145,10 @@ class AnthropicBackend:
         top_p: float,
         stop: list[str] | None,
         stop_event: threading.Event | None = None,
+        # Not enforced here: the Messages API constrains output through tool
+        # schemas, a different request shape. The prompt and the caller's
+        # validation carry it instead.
+        json_schema: dict | None = None,
     ) -> GenerationResult:
         """
         Sends one Messages API request and maps the reply to GenerationResult.

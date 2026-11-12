@@ -150,9 +150,15 @@ class OpenAICompatibleBackend:
         top_p: float,
         stop: list[str] | None,
         stop_event: threading.Event | None = None,
+        json_schema: dict | None = None,
     ) -> GenerationResult:
         """
         Sends one completion request and maps the reply to GenerationResult.
+
+        json_schema is sent as a strict json_schema response_format on chat
+        requests (OpenAI structured outputs; vLLM and llama-server accept the
+        same field). The completions API has no equivalent, so there it is
+        left to the caller's validation.
 
         stop_event cannot interrupt a request already on the wire; the read
         timeout bounds it instead. It is checked before sending, which covers
@@ -164,6 +170,15 @@ class OpenAICompatibleBackend:
             )
 
         path, body, chat = self._request(prompt, max_tokens, temperature, top_p, stop)
+        if json_schema is not None and chat:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output",
+                    "schema": json_schema,
+                    "strict": True,
+                },
+            }
         with _transport_errors(), self._inflight.track():
             response = self._client.post(path, json=body)
 

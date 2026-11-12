@@ -96,9 +96,12 @@ class BackendRunner:
         # the hop to the worker thread.
         ctx = contextvars.copy_context()
         started = time.monotonic()
+        generate = self._backend.generate
+        if generation.json_schema is not None:
+            generate = functools.partial(generate, json_schema=generation.json_schema)
         fut = loop.run_in_executor(
             self._executor,
-            functools.partial(ctx.run, self._backend.generate),
+            functools.partial(ctx.run, generate),
             generation.prompt,
             generation.max_tokens,
             generation.temperature,
@@ -362,6 +365,7 @@ class JobProcessor:
                 temperature=0.0,
                 top_p=1.0,
                 stop=None,
+                json_schema=catalog.SCHEMA,
             )
         return Generation.for_chat(ChatCompletionRequest.model_validate(message.body))
 

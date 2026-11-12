@@ -150,6 +150,20 @@ class FakeLlama:
                 self.active_calls -= 1
 
 
+class FakeGrammar:
+    """Stands in for llama_cpp.LlamaGrammar; remembers the schema it was built from."""
+
+    compiled: list[str] = []
+
+    def __init__(self, schema: str) -> None:
+        self.schema = schema
+
+    @classmethod
+    def from_json_schema(cls, json_schema: str, verbose: bool = True) -> "FakeGrammar":
+        cls.compiled.append(json_schema)
+        return cls(json_schema)
+
+
 class FakeChatFormatter:
     """
     Renders "<|role|> content" per message plus an assistant cue, and records
