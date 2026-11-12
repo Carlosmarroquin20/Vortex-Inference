@@ -132,10 +132,15 @@ class InferenceBackend(Protocol):
         top_p: float,
         stop: list[str] | None,
         stop_event: threading.Event | None = None,
+        json_schema: dict | None = None,
     ) -> GenerationResult:
         """
         Produces one completion for the prompt: a continuation of raw text, or
         the assistant's reply to a conversation.
+
+        json_schema, when given, asks for output matching that JSON Schema.
+        A backend that can enforce it during decoding does; one that cannot
+        ignores it, and the caller's own validation decides.
 
         stop_event is set by the HTTP layer when the request is abandoned
         (deadline or client cancellation). Implementations should return as

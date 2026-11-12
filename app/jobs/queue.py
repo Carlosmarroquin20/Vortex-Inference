@@ -26,6 +26,7 @@ a long delay at the head would hold back every shorter one behind it.
 """
 
 import asyncio
+import logging
 from contextvars import Context
 from dataclasses import dataclass
 from typing import NamedTuple, Protocol
@@ -42,6 +43,8 @@ from opentelemetry.trace import SpanKind
 from app import tracing
 from app.config import Settings
 from app.jobs.models import JobMessage
+
+logger = logging.getLogger("vortex.jobs")
 
 # Upper bound on a single retry delay, however many attempts are allowed.
 MAX_RETRY_DELAY_SECONDS = 3600
@@ -213,6 +216,35 @@ class RabbitMQJobQueue:
     async def close(self) -> None:
         if self._connection is not None:
             await self._connection.close()
+
+    async def ensure_topology(self, retry_seconds: float = 5.0) -> None:
+        """
+        Connects and declares the topology, retrying until RabbitMQ answers.
+
+        Run in the background at startup. The queue has to exist before the
+        first job does: the workers' KEDA scaler reads its length from the
+        management API, and a queue nobody has declared yet is a 404 that
+        leaves the scaler, and the environment's health in Argo CD, failed
+        until someone happens to submit a job. A background task keeps that
+        independent of the synchronous endpoints, which serve meanwhile.
+        """
+        logged = False
+        while True:
+            try:
+                await self._ready()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not logged:
+                    logger.warning(
+                        "RabbitMQ unreachable. Retrying the topology declaration.",
+                        extra={"reason": repr(exc)[:200]},
+                    )
+                    logged = True
+                await asyncio.sleep(retry_seconds)
+                continue
+            logger.info("Job topology declared.", extra={"queue": self._topology.queue})
+            return
 
     async def _ready(self) -> AbstractExchange:
         async with self._lock:

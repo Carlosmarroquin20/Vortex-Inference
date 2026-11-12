@@ -50,6 +50,10 @@ class Generation:
     temperature: float
     top_p: float
     stop: list[str] | None
+    # Constrain the output to this JSON Schema where the backend can (a
+    # llama.cpp grammar, an OpenAI-compatible strict response_format); the
+    # caller still validates the result, since not every backend can.
+    json_schema: dict | None = None
 
     @classmethod
     def for_completion(cls, request: CompletionRequest) -> "Generation":

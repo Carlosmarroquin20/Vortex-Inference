@@ -228,9 +228,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("API key authentication enabled for /v1/completions.")
 
     if settings.jobs_enabled:
-        # Neither service is contacted here: connections open on first use,
-        # so the synchronous endpoints start and serve even while RabbitMQ
-        # or Redis is down, and job requests answer 503 meanwhile.
+        # Startup does not wait for either service, so the synchronous
+        # endpoints start and serve even while RabbitMQ or Redis is down,
+        # and job requests answer 503 meanwhile.
         app.state.jobs = JobServices(
             store=RedisJobStore(
                 settings.redis_url.get_secret_value(),
@@ -244,8 +244,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ),
         )
         logger.info("Asynchronous jobs enabled.", extra={"queue": settings.jobs_queue})
+        # The queue is declared now, in the background, rather than on the
+        # first submission: the workers' autoscaler needs it to exist (see
+        # RabbitMQJobQueue.ensure_topology). Started in an empty context so
+        # the connection's own tasks carry no request ID.
+        topology_task = asyncio.create_task(
+            app.state.jobs.queue.ensure_topology(), context=contextvars.Context()
+        )
     else:
         app.state.jobs = None
+        topology_task = None
 
     yield  # ← Application serves traffic here
 
@@ -273,6 +281,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # again; the process exits regardless.
     _inference_executor.shutdown(wait=False, cancel_futures=True)
     backend.close()
+    if topology_task is not None:
+        topology_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await topology_task
     if app.state.jobs is not None:
         await app.state.jobs.queue.close()
         await app.state.jobs.store.close()

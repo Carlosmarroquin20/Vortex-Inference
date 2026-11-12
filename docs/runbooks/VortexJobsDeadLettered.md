@@ -4,10 +4,20 @@
 there when the worker could not parse it, when processing it raised an
 unexpected error (the job is marked failed with a 500), or when it was
 delivered more than `VORTEX_JOB_MAX_ATTEMPTS` times without an
-acknowledgement, i.e. it kept killing its worker.
+acknowledgement, i.e. it kept killing its worker. Catalog enrichments
+(`/v1/catalog/enrichments`) also land there when no attempt produced an answer
+matching the product schema; the job's `error` (422) names the field that
+failed on the last attempt.
 
 **Impact.** Those jobs will not run again on their own. Clients polling them
 see `failed`, or `running` for a job whose worker died every time.
+
+**Catalog enrichments first.** Compare
+`sum(rate(vortex_catalog_products_total{outcome="failed"}[1h]))` with
+`outcome="enriched"`: a handful of failures is hard products, a jump after a
+release is a regression (prompt, model or schema). `scripts/eval_catalog.py`
+reproduces it on the labelled dataset. Resubmit the products once fixed;
+the dead-lettered jobs stay failed.
 
 **Diagnosis.**
 1. Look at the messages without removing them (`ackmode` requeues them):

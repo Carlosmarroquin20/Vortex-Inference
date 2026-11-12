@@ -195,3 +195,48 @@ WORKER_JOBS_IN_PROGRESS = Gauge(
     "vortex_worker_jobs_in_progress",
     "Jobs the worker has received and not yet acknowledged.",
 )
+
+# ---------------------------------------------------------------------------
+# Catalog enrichment (app/catalog, ADR 0006)
+# ---------------------------------------------------------------------------
+# Valid share, attempts, time and tokens per product: the inputs for the
+# quality and cost figures in the README. Cost itself is not a metric; it is
+# these counters times a price, which belongs to whoever reads them (a
+# provider's per-token price, or a node's price per CPU hour).
+
+CATALOG_OUTPUTS_TOTAL = Counter(
+    "vortex_catalog_outputs_total",
+    "Model answers to enrichment attempts, by whether they matched the "
+    "product schema. valid / (valid + invalid) is the share of usable "
+    "answers per attempt.",
+    ["result"],  # "valid" | "invalid"
+)
+
+CATALOG_PRODUCTS_TOTAL = Counter(
+    "vortex_catalog_products_total",
+    "Products whose enrichment finished: enriched (a valid record was "
+    "stored) or failed (no attempt produced one; the message was "
+    "dead-lettered).",
+    ["outcome"],  # "enriched" | "failed"
+)
+
+CATALOG_ATTEMPTS = Histogram(
+    "vortex_catalog_attempts",
+    "Attempts each finished product took. Above 1, earlier answers were "
+    "rejected by the schema and corrected on retry.",
+    buckets=[1, 2, 3, 4, 5],
+)
+
+CATALOG_ATTEMPT_DURATION_SECONDS = Histogram(
+    "vortex_catalog_attempt_duration_seconds",
+    "Time one enrichment attempt spent generating, by its result.",
+    ["result"],
+    buckets=[0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0, float("inf")],
+)
+
+CATALOG_TOKENS_TOTAL = Counter(
+    "vortex_catalog_tokens_total",
+    "Tokens spent on enrichment attempts, valid or not, by type: what a "
+    "per-token price is applied to.",
+    ["type"],  # "prompt" | "completion"
+)

@@ -6,13 +6,14 @@ a GPU backend), which is what the resource limits, thread caps and
 single-permit concurrency in the deployment are sized for.
 """
 
+import json
 import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from llama_cpp import Llama
+from llama_cpp import Llama, LlamaGrammar
 
 from app.backends.base import (
     ChatMessage,
@@ -93,6 +94,7 @@ class LlamaCppBackend:
             verbose=False,
         )
         self._chat_formatter = self._load_chat_formatter()
+        self._grammars: dict[str, LlamaGrammar] = {}
         if settings.warmup:
             self._warm_up()
 
@@ -150,6 +152,7 @@ class LlamaCppBackend:
         top_p: float,
         stop: list[str] | None,
         stop_event: threading.Event | None = None,
+        json_schema: dict | None = None,
     ) -> GenerationResult:
         """
         Synchronous inference call. Designed to be run in a ThreadPoolExecutor
@@ -163,8 +166,14 @@ class LlamaCppBackend:
         stopping_criteria callback tells llama.cpp to halt at the next token
         boundary. This lets the thread exit cleanly so the semaphore in main.py
         can be released without racing against an in-progress C++ call.
+
+        json_schema: compiled to a GBNF grammar that masks every token the
+        schema does not allow, so the output parses and has the schema's
+        shape (keys, enums, types) by construction, and generation ends when
+        the object closes instead of running on to max_tokens.
         """
         prepared = self._prepare(prompt, stop, stop_event)
+        extra = {"grammar": self._grammar(json_schema)} if json_schema else {}
 
         self._busy_since = time.monotonic()
         try:
@@ -176,6 +185,7 @@ class LlamaCppBackend:
                 stop=prepared.stop,
                 echo=False,
                 stopping_criteria=prepared.stopping_criteria,
+                **extra,
             )
         finally:
             self._busy_since = None
@@ -249,6 +259,16 @@ class LlamaCppBackend:
             self._busy_since = None
 
         yield StreamEnd(finish_reason, prepared.prompt_tokens, completion_tokens)
+
+    def _grammar(self, json_schema: dict) -> LlamaGrammar:
+        # Compiling takes milliseconds but is the same for every job of a
+        # type, so each schema is compiled once per process.
+        key = json.dumps(json_schema, sort_keys=True)
+        grammar = self._grammars.get(key)
+        if grammar is None:
+            grammar = LlamaGrammar.from_json_schema(key, verbose=False)
+            self._grammars[key] = grammar
+        return grammar
 
     def _prepare(
         self,

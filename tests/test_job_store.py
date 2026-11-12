@@ -316,3 +316,35 @@ def test_failed_channel_setup_closes_the_connection(broker, monkeypatch):
     with pytest.raises(JobQueueUnavailable):
         run(make_queue().publish(message()))
     assert connections[0].closed is True
+
+
+def test_topology_is_declared_at_startup_once_rabbitmq_answers(broker):
+    # The workers' scaler needs the queue before any job exists, so the API
+    # declares it in the background and keeps trying while RabbitMQ is down.
+    queue = make_queue()
+    broker["fail_connect"] = ConnectionError("refused")
+
+    async def scenario():
+        task = asyncio.create_task(queue.ensure_topology(retry_seconds=0.01))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        broker["fail_connect"] = None
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(scenario())
+
+    assert len(broker["connects"]) == 1
+
+
+def test_topology_declaration_stops_when_cancelled(broker):
+    queue = make_queue()
+    broker["fail_connect"] = ConnectionError("refused")
+
+    async def scenario():
+        task = asyncio.create_task(queue.ensure_topology(retry_seconds=0.01))
+        await asyncio.sleep(0.03)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())

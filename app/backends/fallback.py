@@ -119,15 +119,17 @@ class FallbackBackend:
         top_p: float,
         stop: list[str] | None,
         stop_event: threading.Event | None = None,
+        json_schema: dict | None = None,
     ) -> GenerationResult:
         args = (prompt, max_tokens, temperature, top_p, stop, stop_event)
+        kwargs = {"json_schema": json_schema} if json_schema is not None else {}
         if self._circuit.is_open():
-            return self._run_fallback("circuit_open", args)
+            return self._run_fallback("circuit_open", args, kwargs)
         try:
-            result = self._primary.generate(*args)
+            result = self._primary.generate(*args, **kwargs)
         except Exception as exc:
             reason = self._divert(exc, stop_event)
-            return self._run_fallback(reason, args, cause=exc)
+            return self._run_fallback(reason, args, kwargs, cause=exc)
         self._circuit.record_success()
         return result
 
@@ -175,13 +177,17 @@ class FallbackBackend:
         return reason
 
     def _run_fallback(
-        self, reason: str, args: tuple, cause: Exception | None = None
+        self,
+        reason: str,
+        args: tuple,
+        kwargs: dict,
+        cause: Exception | None = None,
     ) -> GenerationResult:
         BACKEND_FALLBACKS_TOTAL.labels(reason=reason).inc()
         if cause is not None:
             self._log(reason, cause)
         try:
-            result = self._fallback.generate(*args)
+            result = self._fallback.generate(*args, **kwargs)
         except Exception as exc:
             if cause is not None:
                 # Both failed; the fallback's error is the one the client
