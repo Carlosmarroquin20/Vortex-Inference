@@ -1,0 +1,96 @@
+# Health of a canary, measured on the canary's pods only (ADR 0003).
+#
+# Every query selects rollouts_pod_template_hash, which the ServiceMonitor
+# copies from the pod label Argo Rollouts puts on each revision's pods. The
+# stable pods' traffic therefore cannot dilute a bad canary's numbers, and
+# the canary cannot pass on the strength of the stable pods' history.
+#
+# Three checks, each over the last WINDOW, three times 30s apart after the
+# canary has had WINDOW to collect traffic:
+#
+#   request-volume   at least MIN_REQUESTS completions reached the canary,
+#                    so the other two are judged on data, never on silence;
+#   error-rate       the share of those that ended in 5xx;
+#   p95-latency      the 95th percentile of their end-to-end duration.
+#
+# The thresholds come from a measured baseline (evals/baselines/canary.json,
+# produced by scripts/canary_baseline.py with the same load the analysis
+# runs under); the ADR explains how each is derived from it.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: vortex-canary
+  namespace: vortex-inference
+  labels:
+    app.kubernetes.io/name: vortex-inference
+    app.kubernetes.io/component: canary-analysis
+spec:
+  args:
+  - name: namespace
+  - name: canary-hash
+  - name: min-requests
+    value: "33"
+  - name: max-error-rate
+    value: "0.03"
+  - name: max-p95-seconds
+    value: "2.0"
+  metrics:
+  - name: request-volume
+    initialDelay: 90s
+    interval: 30s
+    count: 3
+    # The first window of a fresh pod includes its slowest requests (cold
+    # page cache) and so its fewest; one short window is tolerated, two of
+    # three must reach the minimum. Zero traffic still fails every window.
+    failureLimit: 1
+    successCondition: result[0] >= {{args.min-requests}}
+    provider:
+      prometheus:
+        address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          sum(increase(vortex_http_responses_total{
+            namespace="{{args.namespace}}",
+            rollouts_pod_template_hash="{{args.canary-hash}}",
+            route=~"/v1/(chat/)?completions"
+          }[90s])) or vector(0)
+  - name: error-rate
+    initialDelay: 90s
+    interval: 30s
+    count: 3
+    failureLimit: 0
+    successCondition: result[0] <= {{args.max-error-rate}}
+    provider:
+      prometheus:
+        address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          (
+            sum(increase(vortex_http_responses_total{
+              namespace="{{args.namespace}}",
+              rollouts_pod_template_hash="{{args.canary-hash}}",
+              route=~"/v1/(chat/)?completions",
+              code="5xx"
+            }[90s])) or vector(0)
+          )
+          /
+          sum(increase(vortex_http_responses_total{
+            namespace="{{args.namespace}}",
+            rollouts_pod_template_hash="{{args.canary-hash}}",
+            route=~"/v1/(chat/)?completions"
+          }[90s]))
+  - name: p95-latency
+    initialDelay: 90s
+    interval: 30s
+    count: 3
+    # One slow window is tolerated (a cold cache, a noisy neighbour on the
+    # node); two of three are a slow release.
+    failureLimit: 1
+    successCondition: result[0] <= {{args.max-p95-seconds}}
+    provider:
+      prometheus:
+        address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          histogram_quantile(0.95, sum by (le) (rate(vortex_http_response_duration_seconds_bucket{
+            namespace="{{args.namespace}}",
+            rollouts_pod_template_hash="{{args.canary-hash}}",
+            route=~"/v1/(chat/)?completions"
+          }[90s])))
