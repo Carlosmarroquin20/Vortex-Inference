@@ -152,6 +152,11 @@ jobs:
             > evidence/prod-analysis-summary.tsv 2>/dev/null || true
           kubectl get events -n vortex-prod --sort-by=.lastTimestamp > evidence/prod-events.txt 2>/dev/null || true
           kubectl get applications.argoproj.io -n argocd -o wide > evidence/applications.txt 2>/dev/null || true
+          kubectl get applications.argoproj.io -n argocd -o json > evidence/applications.json 2>/dev/null || true
+          for ns in vortex-staging vortex-prod; do
+            kubectl get rollout,deployment,statefulset,scaledobject,pdb,pvc,sealedsecret,pods \
+              -n "${ns}" -o wide > "evidence/${ns}-objects.txt" 2>&1 || true
+          done
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

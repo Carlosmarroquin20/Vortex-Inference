@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+data:
+  # Argo CD 3 no longer writes each resource's health into the Application's
+  # status by default; the UI and API read it from the controller instead.
+  # These clusters are inspected with kubectl (scripts/gitops-wait.sh, the
+  # e2e evidence), so the per-resource health is kept in the status, where
+  # a Degraded environment says which object is degraded and why.
+  controller.resource.health.persist: "true"
