@@ -1,0 +1,55 @@
+{
+  "model": "qwen2.5-0.5b-instruct-q2_k",
+  "decoding": "prompt only (no output constraint)",
+  "run": "CI run 43317929253, 2026-11-12",
+  "workers": "3 x 1 CPU",
+  "summary": {
+    "products": 200,
+    "valid_rate": 0.46,
+    "first_attempt_valid_rate": 0.415,
+    "mean_attempts": 2.135,
+    "accuracy": {
+      "category": 0.325,
+      "brand": 0.235,
+      "material": 0.415,
+      "dimensions": 0.38,
+      "title": 0.11
+    },
+    "accuracy_mean": 0.293,
+    "all_fields_correct": 0.025,
+    "title_f1_mean": 0.2983,
+    "per_category_all_fields": {
+      "bed": 0.0,
+      "chair": 0.0,
+      "lamp": 0.0,
+      "mirror": 0.0,
+      "ottoman": 0.0,
+      "pillow": 0.0,
+      "planter": 0.0,
+      "rug": 0.2,
+      "sofa": 0.0,
+      "table": 0.05
+    },
+    "per_product": {
+      "generation_seconds_p50": 18.226,
+      "generation_seconds_p95": 31.869,
+      "prompt_tokens_mean": 855.7,
+      "completion_tokens_mean": 261.7,
+      "compute_cost_usd_mean": 0.000157,
+      "token_cost_usd_mean": 0.0
+    },
+    "pricing": {
+      "cpu_hour_price_usd": 0.0336,
+      "cpus_per_worker": 1.0,
+      "input_price_usd_per_million": 0.0,
+      "output_price_usd_per_million": 0.0
+    },
+    "throughput_products_per_minute": 10.62,
+    "wall_seconds": 1130.2
+  },
+  "failure_reasons": {
+    "additional properties": 28,
+    "not valid JSON": 78,
+    "other schema violation": 2
+  }
+}

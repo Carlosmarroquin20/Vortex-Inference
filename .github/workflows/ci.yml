@@ -287,7 +287,10 @@ jobs:
       # (200 public ABO listings, labelled) is submitted as a job; the report
       # has the share of valid records, per-field accuracy against the
       # labels, attempts, time, tokens and estimated cost per product. The
-      # gate sits a little below the recorded baseline in evals/baselines/.
+      # gate sits a little below the recorded baseline
+      # (evals/baselines/catalog-qwen2.5-0.5b-q2_k.json: 100% valid, 0.617
+      # mean field accuracy). Decoding is greedy and grammar-constrained, so
+      # a drop beyond CPU-kernel noise is a real regression.
       - name: Start RabbitMQ and Redis
         run: |
           docker rm -f vortex-eval
@@ -319,7 +322,8 @@ jobs:
           done
           python3 scripts/eval_catalog.py --url http://127.0.0.1:8080 \
             --dataset evals/datasets/catalog.jsonl --concurrency 8 \
-            --cpus-per-worker 1 --json catalog-report.json
+            --cpus-per-worker 1 --min-valid-rate 0.95 --min-accuracy 0.55 \
+            --json catalog-report.json
 
       - name: Catalog service logs
         if: failure()
