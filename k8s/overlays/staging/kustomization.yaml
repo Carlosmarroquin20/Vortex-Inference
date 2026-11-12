@@ -22,7 +22,7 @@ patches:
 - path: keda-autoscaler.yaml
 
 images:
-- digest: sha256:926022e350076c0bb2ef82787f383e9d1ca1b5b4c60e2feb121e98965d5c201c
+- digest: sha256:a0d77a7fdf93d09823fd4ef490242a6e8e3f1a33bb573329c265b8815b0e1a05
   name: vortex-inference
   newName: ghcr.io/carlosmarroquin20/vortex-inference
-  newTag: sha-111a835
+  newTag: sha-6ed4b9c
