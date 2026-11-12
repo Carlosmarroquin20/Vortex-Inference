@@ -11,7 +11,9 @@ The summary names the canary step, the ready pods of each revision, and the
 latest measurement of each metric in the canary's current AnalysisRun, e.g.
 
   Progressing | step 2/4 analysis | stable 3, canary 1 | Running:
-  request-volume=31(Successful) error-rate=0(Successful) p95-latency=0.9(Successful)
+  request-volume=102 ok error-rate=0 ok p95-latency=0.773 ok
+
+A metric shows ok or FAILED once it has a verdict, nothing while running.
 
 Reads the cluster through kubectl, without the Argo Rollouts kubectl plugin.
 """
@@ -28,6 +30,23 @@ def kubectl_json(*args: str) -> dict:
         ["kubectl", *args, "-o", "json"], check=True, capture_output=True, text=True
     ).stdout
     return json.loads(out)
+
+
+# A metric's verdict so far; nothing while it is still being measured.
+VERDICTS = {
+    "Successful": "ok",
+    "Failed": "FAILED",
+    "Error": "ERROR",
+    "Inconclusive": "?",
+}
+
+
+def readable(value: str) -> str:
+    """A measurement to three significant figures (Prometheus returns 16)."""
+    try:
+        return f"{float(value):.3g}"
+    except ValueError:
+        return value
 
 
 def ready(pod: dict) -> bool:
@@ -76,7 +95,10 @@ def summary(namespace: str, rollout: dict) -> str:
             for metric in latest.get("status", {}).get("metricResults", []):
                 if metric.get("measurements"):
                     value = metric["measurements"][-1].get("value", "?").strip("[]")
-                    parts.append(f"{metric['name']}={value}({metric['phase']})")
+                    verdict = VERDICTS.get(metric["phase"], "")
+                    parts.append(
+                        f"{metric['name']}={readable(value)} {verdict}".rstrip()
+                    )
             if parts:
                 phase = latest.get("status", {}).get("phase", "")
                 measured = f" | {phase}: " + " ".join(parts)
