@@ -23,6 +23,10 @@ labels:
 patches:
 - path: keda-autoscaler.yaml
 - path: pdb.yaml
+- path: demo-release.yaml
+  target:
+    kind: Rollout
+    name: vortex-inference
 
 images:
 - digest: sha256:a0d77a7fdf93d09823fd4ef490242a6e8e3f1a33bb573329c265b8815b0e1a05
