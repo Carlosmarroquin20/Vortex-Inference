@@ -2,6 +2,20 @@
 
 A production-grade MLOps platform for serving specialized Small Language Models (SLMs) on Kubernetes. Designed to demonstrate high-availability inference patterns in resource-constrained environments using event-driven autoscaling, native observability, and GGUF quantization.
 
+![Canary demonstration: a good release reaches 100%, a release failing half its requests is aborted by the analysis, git revert restores the environment](docs/demo/canary.gif)
+
+The clip shows a real run of [`scripts/demo-canary.sh`](scripts/demo-canary.sh)
+from CI, replayed as a time-lapse, on prod in a kind cluster that Argo CD
+built from git. There are three releases:
+
+1. A good release goes through 10% → analysis → 50% → analysis → 100%.
+2. A release that fails half its completions (`VORTEX_FAULT_RATE=0.5`) is
+   aborted at 10%. The error rate measured on the canary was 47%, against a
+   3% threshold. The stable pods kept serving the whole time.
+3. A `git revert` of that commit brings the environment back.
+
+See [Canary releases](#canary-releases).
+
 ---
 
 ## Architecture
