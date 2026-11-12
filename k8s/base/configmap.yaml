@@ -79,7 +79,7 @@ data:
   VORTEX_JOBS_QUEUE: "vortex.jobs"
   VORTEX_JOB_TTL_SECONDS: "86400"
   # Fixed in the queue's arguments when RabbitMQ first creates it; changing
-  # it later means deleting the queue (see docs/runbooks.md).
+  # it later means deleting the queue (see docs/runbooks/README.md).
   VORTEX_JOB_MAX_ATTEMPTS: "3"
   VORTEX_JOB_RETRY_DELAY_SECONDS: "10"
   VORTEX_WORKER_METRICS_PORT: "9090"

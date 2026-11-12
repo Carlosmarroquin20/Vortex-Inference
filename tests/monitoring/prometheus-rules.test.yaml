@@ -38,7 +38,7 @@ tests:
               team: mlops
               slo: latency
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferenceslowtimetofirsttoken"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexInferenceSlowTimeToFirstToken.md"
               summary: "Streamed requests wait more than 10s for their first token (P95)"
               description: "P95 time to first token is 14.65s. Compare with the queue wait P95 to tell missing capacity from slow prompt processing or a slow upstream provider.\n"
 
@@ -83,7 +83,7 @@ tests:
               severity: warning
               team: mlops
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexprimarybackendbypassed"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexPrimaryBackendBypassed.md"
               summary: "The primary backend is being bypassed for the fallback"
               description: "For 10m, requests have gone straight to the fallback backend because the primary failed repeatedly. Check vortex_backend_fallbacks_total by reason and the primary's errors in the logs.\n"
 
@@ -117,7 +117,7 @@ tests:
               severity: warning
               team: mlops
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsdeadlettered"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexJobsDeadLettered.md"
               summary: "Jobs are waiting in the dead-letter queue"
               description: "1 message(s) in vortex.jobs.dead. Their jobs are marked failed or were interrupted on every attempt; inspect the messages and the worker logs for their job IDs before purging or requeueing.\n"
 
@@ -139,7 +139,7 @@ tests:
               severity: critical
               team: mlops
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsnotconsumed"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexJobsNotConsumed.md"
               summary: "Jobs are queued but no worker is consuming them"
               description: "vortex.jobs has had ready messages and no consumers for 10m; no job is making progress. Check the worker ScaledObject and the vortex-worker pods.\n"
 
@@ -176,7 +176,7 @@ tests:
               severity: warning
               team: mlops
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsslowtostart"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexJobsSlowToStart.md"
               summary: "Jobs wait more than 10 minutes before they start (P95)"
               description: "P95 time from submission to first attempt is 1740s. The workers are at their maximum replica count or each one is saturated.\n"
 
@@ -199,7 +199,7 @@ tests:
               team: mlops
               component: queue
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexjobsubmissionsfailing"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexJobSubmissionsFailing.md"
               summary: "Job submissions are failing: queue unavailable"
               description: "POST /v1/jobs has been answering 503 for 5m because the job queue (store is Redis, queue is RabbitMQ) cannot be reached. Check the vortex-redis and vortex-rabbitmq pods.\n"
 
@@ -225,7 +225,7 @@ tests:
               severity: critical
               team: mlops
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencenoreadypods"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexInferenceNoReadyPods.md"
               summary: "No ready inference pods — all traffic is being dropped"
               description: "No vortex-inference pod has been ready for 2 minutes. Clients are receiving 503 responses. Check pod events for OOM kills, image pull failures, or failed readiness probes.\n"
 
@@ -244,6 +244,6 @@ tests:
               team: mlops
               container: inference-server
             exp_annotations:
-              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks.md#vortexinferencenoreadypods"
+              runbook_url: "https://github.com/Carlosmarroquin20/Vortex-Inference/blob/main/docs/runbooks/VortexInferenceNoReadyPods.md"
               summary: "No ready inference pods — all traffic is being dropped"
               description: "No vortex-inference pod has been ready for 2 minutes. Clients are receiving 503 responses. Check pod events for OOM kills, image pull failures, or failed readiness probes.\n"

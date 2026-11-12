@@ -22,6 +22,98 @@ See [Canary releases](#canary-releases).
 
 ---
 
+## How a change reaches production
+
+Nothing in staging or prod changes except through git, and nobody approves a
+deployment. A merged pull request reaches prod, or is stopped on the way, as
+follows:
+
+```mermaid
+flowchart LR
+    PR[Pull request] -->|"CI: lint, tests, pip-audit,<br/>Trivy, eval gate, kind e2e"| MAIN[merge to main]
+    MAIN --> BUILD["release.yml: amd64 + arm64,<br/>native runners"]
+    BUILD -->|"no fixable CRITICAL CVE"| GHCR[("GHCR<br/>sha-commit")]
+    GHCR -->|"cosign signature,<br/>SBOM, SLSA provenance"| VERIFY{verify}
+    VERIFY -->|"commit tag@digest<br/>k8s/overlays/staging"| GIT[(git main)]
+    GIT -->|polls| ARGO[Argo CD]
+    ARGO --> SCANARY["staging canary<br/>10% → analysis → 50% → analysis"]
+    SCANARY -->|"smoke test passes"| PROMOTE["commit the same tag@digest<br/>k8s/overlays/prod"]
+    PROMOTE --> GIT
+    ARGO --> PCANARY["prod canary<br/>10% → analysis → 50% → analysis"]
+    PCANARY -->|"analysis passes"| PROD["prod at 100%"]
+    SCANARY -. "analysis fails: abort,<br/>prod is never touched" .-> STOP((stop))
+    PCANARY -. "analysis fails: abort,<br/>stable keeps serving" .-> STOP
+```
+
+1. **Pull request.** CI runs on every pull request:
+   - lint, unit and integration tests, and the dependency audit;
+   - Trivy on the built image;
+   - the evaluation gate, which scores a real model on the built image;
+   - the [end-to-end test](#end-to-end-test-on-a-real-cluster), where a
+     kind cluster built by Argo CD runs a good release, a bad release and a
+     revert.
+2. **Image.** On merge, [`release.yml`](.github/workflows/release.yml) builds
+   linux/amd64 and linux/arm64 on native runners. It refuses fixable
+   CRITICAL CVEs, then publishes `sha-<commit>` to GHCR. The image is signed
+   keylessly with cosign and carries an SBOM and SLSA provenance. The
+   release continues only if `cosign verify` passes on clean runners of both
+   architectures ([ADR 0001](docs/adr/0001-publish-signed-multi-arch-images.md)).
+3. **Staging.** The workflow commits `tag@digest` to `k8s/overlays/staging`.
+   Argo CD applies the commit, and Argo Rollouts takes it through a canary
+   under client traffic. Staging is healthy when the analysis passes, the
+   Rollout reaches 100% and the smoke test passes
+   ([ADR 0002](docs/adr/0002-gitops-with-argo-cd.md),
+   [ADR 0003](docs/adr/0003-canary-releases-with-argo-rollouts.md)).
+4. **Prod.** The same `tag@digest` is committed to `k8s/overlays/prod` and
+   goes through the same canary, then the smoke test and a drift check. A
+   failed analysis aborts the rollout while the stable pods keep serving,
+   and the pipeline stops there.
+
+The git history of the two overlays is the deployment log:
+
+```bash
+git log --oneline -- k8s/overlays/prod/
+```
+
+### Rolling back
+
+**Main path: `git revert`.**
+
+```bash
+git log --oneline -- k8s/overlays/prod/   # deploy(prod): sha-… commits
+git revert <commit> && git push origin main
+```
+
+Argo CD applies the revert within a minute. The previous image is still on
+the nodes. Its pod template is the Rollout's stable revision, so going back
+skips the canary steps and is immediate.
+
+Why git and not the cluster:
+
+- `kubectl argo rollouts undo`, `kubectl rollout undo` and editing the
+  Rollout in place all work for a few seconds. Then Argo CD's self-heal
+  restores what git says, which is still the bad release. The
+  [drift check](#gitops-staging-and-prod) in every pipeline run proves that
+  it does.
+- A revert is a commit. It is reviewed like any change, it is in the
+  deployment log with an author and a reason, and the next promotion starts
+  from it rather than from a cluster state nobody wrote down.
+- An aborted canary needs no urgent action: the stable pods never stopped
+  serving. The revert afterwards brings git back in line, so that it stops
+  asking for the release that failed.
+
+In a real emergency, before a revert can merge, an operator can pause Argo
+CD's automated sync on the Application and act on the cluster directly.
+That is a deliberate, visible exception. Re-enabling sync then reconciles
+the cluster to git again.
+
+Locally (`make deploy`, no Argo CD), `kubectl rollout undo
+deployment/vortex-inference -n vortex-inference` remains the rollback.
+The alternatives that were rejected are in
+[ADR 0005](docs/adr/0005-rollback-by-git-revert.md).
+
+---
+
 ## Architecture
 
 ```
@@ -506,7 +598,7 @@ Secret.
   PersistentVolumeClaims; Redis refuses writes rather than evicting job
   records when it reaches `maxmemory`.
 - **Alerts** for the dead-letter queue, jobs nobody consumes, slow starts and
-  failing submissions, with runbooks in [docs/runbooks.md](docs/runbooks.md),
+  failing submissions, with runbooks in [docs/runbooks/](docs/runbooks/README.md),
   and an Asynchronous Jobs row in the Grafana dashboard.
 
 ## Evaluation
@@ -651,14 +743,43 @@ the pods' egress to it; the NetworkPolicies deny it by default.
 
 ## SLOs
 
-| SLO | Target | Alert Severity |
+Two service level objectives for the completion API, per environment, over
+a rolling 30 days. Both are measured at the HTTP layer
+(`vortex_http_responses_total`, `vortex_http_response_duration_seconds`),
+which is what clients experience. That includes requests that never reach
+the engine.
+
+| SLO | Objective | SLI (PromQL) |
 |---|---|---|
-| P95 inference latency | < 10s | Warning |
-| P99 inference latency | < 30s | Critical |
-| P95 time to first token (streamed) | < 10s | Warning |
-| Error ratio (5m window) | < 1% | Warning |
-| Error ratio (5m window) | < 5% | Critical |
-| Ready pod count | ≥ 1 | Critical |
+| Availability | 99.5% of completion requests do not end in 5xx | `1 - sum(rate(vortex_http_responses_total{route=~"/v1/(chat/)?completions",code="5xx"}[30d])) / sum(rate(vortex_http_responses_total{route=~"/v1/(chat/)?completions"}[30d]))` |
+| Latency | p95 of completion requests ≤ 10 s | `histogram_quantile(0.95, sum by (le) (rate(vortex_http_response_duration_seconds_bucket{route=~"/v1/(chat/)?completions"}[30d])))` |
+
+**What these numbers mean.**
+
+- A 99.5% availability objective leaves an error budget of 0.5%. That is
+  about 3.6 hours of total outage in 30 days, or 1 failed request in 200.
+- The 10 s latency covers the full range of requests the service accepts:
+  long prompts, `max_tokens` up to the limit, and CPU inference.
+- The canary gate is stricter (p95 ≤ 2 s, 3% errors) because it judges
+  short, fixed requests under a measured load. A gate equal to the SLO
+  would let a release through that halves the speed of typical requests.
+
+**When the budget runs out**, releases stop until it recovers. The
+mechanism is the same as for a rollback: a commit that pins the
+environment's image, reviewed like any other.
+
+The alerts are the early warnings that protect these objectives:
+
+| Alert | Fires at | Severity | Protects |
+|---|---|---|---|
+| `VortexInferenceHighP95Latency` | engine p95 > 10 s for 5 min | warning | latency |
+| `VortexInferenceCriticalP99Latency` | engine p99 > 30 s for 3 min | critical | latency |
+| `VortexInferenceSlowTimeToFirstToken` | streamed p95 TTFT > 10 s for 5 min | warning | latency |
+| `VortexInferenceHighErrorRate` | errors > 1% over 5 min | warning | availability |
+| `VortexInferenceCriticalErrorRate` | errors > 5% over 3 min | critical | availability |
+| `VortexInferenceNoReadyPods` | no ready pod for 2 min | critical | availability |
+
+Each alert links to a short runbook in [docs/runbooks/](docs/runbooks/README.md).
 
 ---
 
@@ -849,7 +970,7 @@ vortex-inference/
 ├── docs/
 │   ├── adr/                  # Architecture decision records, with the alternatives rejected
 │   ├── demo/                 # VHS tape and the canary GIF it records
-│   └── runbooks.md           # One runbook per alert, linked via runbook_url
+│   └── runbooks/             # One runbook per alert (runbook_url), rollback, broker operations
 ├── docker/
 │   └── Dockerfile            # Multi-stage build: OpenBLAS compilation + slim runtime
 ├── k8s/
