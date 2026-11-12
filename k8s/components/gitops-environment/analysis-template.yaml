@@ -29,11 +29,11 @@ spec:
   - name: namespace
   - name: canary-hash
   - name: min-requests
-    value: "MIN_REQUESTS"
+    value: "44"
   - name: max-error-rate
-    value: "MAX_ERROR_RATE"
+    value: "0.023"
   - name: max-p95-seconds
-    value: "MAX_P95_SECONDS"
+    value: "2.0"
   metrics:
   - name: request-volume
     initialDelay: 90s

@@ -93,7 +93,25 @@ against the stable pods every 30 seconds. The run is in
   The histogram's buckets are 0.5s apart in this range, so a tighter margin
   would fail on interpolation noise.
 
-BASELINE_TABLE
+The measured baseline (2026-11-12, CI run 43261634727) used prod running
+`sha-111a835`, three ready pods, 2 concurrent clients, 16-token
+completions and 420 s of load:
+
+| Measurement | Worst window (10 windows) | Threshold |
+|-------------|---------------------------|-----------|
+| Completions per window, all pods | 265.9 (88.6 per pod) | `min-requests` = 44 |
+| 5xx share | 0 (0 of 1,309 requests) | `max-error-rate` = 0.023 (1/44) |
+| p95, server histogram | 1.32 s | `max-p95-seconds` = 2.0 |
+
+The client saw a p95 of 1.05 s for the same requests (`loadgen.py`). The
+server figure is higher because `histogram_quantile` interpolates linearly
+inside the 1.0–1.5 s bucket. The threshold is compared with the server
+figure, so it was derived from that figure too.
+
+The load is closed-loop with two clients, so throughput (about 3.1 requests
+per second) does not depend on the number of pods. When the canary is
+running at 10%, the canary pod is one of four and gets about 70 completions
+per window. At 50%, it gets about 140. Both are well above the minimum.
 
 The thresholds hold only for that load and that model. A different load,
 model or node size needs a new baseline. The script is the procedure.

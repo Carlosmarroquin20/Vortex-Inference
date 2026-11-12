@@ -1,0 +1,101 @@
+{
+  "measured_at": "2026-11-12T16:55:13Z",
+  "environment": "vortex-prod",
+  "image": "ghcr.io/carlosmarroquin20/vortex-inference:sha-111a835@sha256:926022e350076c0bb2ef82787f383e9d1ca1b5b4c60e2feb121e98965d5c201c",
+  "ready_pods": 3,
+  "load": {
+    "generator": "scripts/loadgen.py via scripts/traffic.sh",
+    "concurrency": 2,
+    "duration_s": 420,
+    "endpoint": "completions",
+    "max_tokens": 16,
+    "temperature": 0
+  },
+  "windows": [
+    {
+      "request-volume": 265.8572,
+      "error-rate": 0.0,
+      "p95-latency": 1.301281415865943,
+      "elapsed_s": 90
+    },
+    {
+      "request-volume": 282.0,
+      "error-rate": 0.0,
+      "p95-latency": 1.3219696969696968,
+      "elapsed_s": 120
+    },
+    {
+      "request-volume": 277.2,
+      "error-rate": 0.0,
+      "p95-latency": 1.2489130434782603,
+      "elapsed_s": 150
+    },
+    {
+      "request-volume": 282.0,
+      "error-rate": 0.0,
+      "p95-latency": 1.2062499999999998,
+      "elapsed_s": 180
+    },
+    {
+      "request-volume": 282.0,
+      "error-rate": 0.0,
+      "p95-latency": 1.19078947368421,
+      "elapsed_s": 210
+    },
+    {
+      "request-volume": 290.4,
+      "error-rate": 0.0,
+      "p95-latency": 1.2369565217391305,
+      "elapsed_s": 240
+    },
+    {
+      "request-volume": 288.0,
+      "error-rate": 0.0,
+      "p95-latency": 1.2391304347826084,
+      "elapsed_s": 270
+    },
+    {
+      "request-volume": 272.4,
+      "error-rate": 0.0,
+      "p95-latency": 1.2297619047619042,
+      "elapsed_s": 300
+    },
+    {
+      "request-volume": 268.79999999999995,
+      "error-rate": 0.0,
+      "p95-latency": 1.1705882352941175,
+      "elapsed_s": 330
+    },
+    {
+      "request-volume": 280.8,
+      "error-rate": 0.0,
+      "p95-latency": 1.1749999999999994,
+      "elapsed_s": 360
+    }
+  ],
+  "client": {
+    "requests": 1309,
+    "succeeded": 1309,
+    "failed": 0,
+    "failures_by_status": {},
+    "wall_seconds": 420.1925966,
+    "requests_per_second": 3.1152381326844156,
+    "output_tokens_per_second": 49.84381012295065,
+    "latency_seconds": {
+      "count": 1309,
+      "mean": 0.6418357544041247,
+      "p50": 0.5461838820000366,
+      "p90": 1.001799188000018,
+      "p95": 1.0471095727999908,
+      "p99": 1.1991012444799856,
+      "max": 1.2773372319999794
+    },
+    "ttft_seconds": null,
+    "tpot_seconds": null
+  },
+  "thresholds": {
+    "min-requests": 44,
+    "max-error-rate": 0.023,
+    "max-p95-seconds": 2.0
+  }
+}
