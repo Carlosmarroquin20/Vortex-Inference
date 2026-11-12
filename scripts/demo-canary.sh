@@ -75,7 +75,16 @@ git -C "${root}" fetch --quiet origin "${branch}"
 git -C "${root}" worktree add --quiet --detach "${worktree}" "origin/${branch}"
 
 publish() {
-  git -C "${worktree}" push --quiet origin "HEAD:${branch}"
+  # GitHub occasionally answers a push with a transient 5xx; a release must
+  # not fail on that, so the push is retried with a short backoff. Nothing
+  # else writes to this branch, so a retry never needs a rebase.
+  local attempt
+  for attempt in 1 2 3 4; do
+    git -C "${worktree}" push --quiet origin "HEAD:${branch}" && break
+    [ "${attempt}" -lt 4 ] || { say "FAIL: could not push to ${branch}"; return 1; }
+    say "push rejected (attempt ${attempt}); retrying"
+    sleep $((attempt * 5))
+  done
   kubectl annotate applications.argoproj.io -n argocd "${namespace}" \
     argocd.argoproj.io/refresh=normal --overwrite > /dev/null
   say "pushed $(git -C "${worktree}" log -1 --format='%h %s') to ${branch}; Argo CD syncing"
