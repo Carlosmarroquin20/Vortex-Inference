@@ -1,6 +1,7 @@
 """POST /v1/jobs and GET /v1/jobs/{id} against in-memory store and queue."""
 
 import re
+from collections.abc import Iterator
 
 import pytest
 from pydantic import SecretStr
@@ -22,10 +23,17 @@ CHAT_JOB = {
 
 
 @pytest.fixture
-def jobs(client, monkeypatch) -> JobServices:
+def jobs(client) -> Iterator[JobServices]:
+    # Set and restored by hand rather than with monkeypatch: Starlette's
+    # State keeps attributes in an internal dict, and pytest 9.2's
+    # monkeypatch.setattr no longer sees them as existing, so its undo
+    # deleted app.state.jobs instead of restoring it, and the application's
+    # shutdown then failed to find it.
     services = JobServices(store=InMemoryJobStore(), queue=FakeJobQueue())
-    monkeypatch.setattr(main.app.state, "jobs", services)
-    return services
+    previous = main.app.state.jobs
+    main.app.state.jobs = services
+    yield services
+    main.app.state.jobs = previous
 
 
 def submit(client, payload=COMPLETION_JOB, **headers):
