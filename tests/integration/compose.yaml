@@ -9,7 +9,7 @@ name: vortex-integration
 
 services:
   rabbitmq:
-    image: rabbitmq:4.4.0-management-alpine@sha256:d5c8b200a061242868833c8bbdd0703534a4a06ffe654a853e33acd46c7ce258
+    image: rabbitmq:4.4.0-management-alpine@sha256:4841f6384ef8313c3594cd3f2e9f40c10805f8a61c45f08a9a5d9ddea8199267
     environment:
       RABBITMQ_DEFAULT_USER: vortex
       RABBITMQ_DEFAULT_PASS: integration-only
@@ -24,7 +24,7 @@ services:
       retries: 24
 
   redis:
-    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    image: redis:8.10.2-alpine@sha256:9f8d2d789b9a1d1e3f283f979aa9cbf393373806472e1ccd460e2f9c869b833b
     # No persistence: every run starts empty.
     command: ["redis-server", "--requirepass", "integration-only", "--save", "", "--appendonly", "no"]
     ports:
